@@ -4452,6 +4452,7 @@ defm PseudoVLSEG : VPseudoUSSegLoadFF;
 // 12.1. Vector Single-Width Integer Add and Subtract
 //===----------------------------------------------------------------------===//
 defm PseudoVADD   : VPseudoVALU_VV_VX_VI;
+defm PseudoVADDMP_ASA : VPseudoVALU_VV_VX_VI;
 defm PseudoVSUB   : VPseudoVALU_VV_VX;
 defm PseudoVRSUB  : VPseudoVALU_VX_VI;
 
@@ -5045,6 +5046,7 @@ let Predicates = [HasVInstructions] in {
 // 12.1. Vector Single-Width Integer Add and Subtract
 //===----------------------------------------------------------------------===//
 defm : VPatBinaryV_VV_VX_VI<"int_riscv_vadd", "PseudoVADD", AllIntegerVectors>;
+defm : VPatBinaryV_VV_VX_VI<"int_riscv_vaddmp_asa", "PseudoVADDMP_ASA", AllIntegerVectors>;
 defm : VPatBinaryV_VV_VX<"int_riscv_vsub", "PseudoVSUB", AllIntegerVectors>;
 defm : VPatBinaryV_VX_VI<"int_riscv_vrsub", "PseudoVRSUB", AllIntegerVectors>;
 

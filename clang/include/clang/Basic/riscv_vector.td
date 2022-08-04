@@ -1629,6 +1629,7 @@ defm : RVVIndexedSegStore<"vsoxseg">;
 // 12.1. Vector Single-Width Integer Add and Subtract
 let UnMaskedPolicy = HasPassthruOperand in {
 defm vadd : RVVIntBinBuiltinSet;
+defm vaddmp_asa : RVVIntBinBuiltinSet;
 defm vsub : RVVIntBinBuiltinSet;
 defm vrsub : RVVOutOp1BuiltinSet<"vrsub", "csil",
                                  [["vx", "v", "vve"],

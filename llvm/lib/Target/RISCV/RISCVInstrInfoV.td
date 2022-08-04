@@ -918,6 +918,9 @@ let Predicates = [IsRV64, HasVInstructionsI64] in {
 let Predicates = [HasVInstructions] in {
 // Vector Single-Width Integer Add and Subtract
 defm VADD_V : VALU_IV_V_X_I<"vadd", 0b000000>;
+
+defm VADDMP_ASA_V : VALU_IV_V_X_I<"vaddmp_asa", 0b111111>;
+
 defm VSUB_V : VALU_IV_V_X<"vsub", 0b000010>;
 defm VRSUB_V : VALU_IV_X_I<"vrsub", 0b000011>;
 
