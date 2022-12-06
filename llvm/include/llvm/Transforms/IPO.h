@@ -21,8 +21,6 @@
 namespace llvm {
 
 struct InlineParams;
-class StringRef;
-class ModuleSummaryIndex;
 class ModulePass;
 class Pass;
 class BasicBlock;
@@ -113,12 +111,6 @@ Pass *createFunctionInliningPass(unsigned OptLevel, unsigned SizeOptLevel,
 Pass *createFunctionInliningPass(InlineParams &Params);
 
 //===----------------------------------------------------------------------===//
-/// createPruneEHPass - Return a new pass object which transforms invoke
-/// instructions into calls, if the callee can _not_ unwind the stack.
-///
-Pass *createPruneEHPass();
-
-//===----------------------------------------------------------------------===//
 /// createInternalizePass - This pass loops over all of the functions in the
 /// input module, internalizing all globals (functions and variables) it can.
 ////
@@ -146,10 +138,6 @@ ModulePass *createDeadArgEliminationPass();
 /// functions as well.  This is definitely not safe, and should only be used by
 /// bugpoint.
 ModulePass *createDeadArgHackingPass();
-
-//===----------------------------------------------------------------------===//
-/// createOpenMPOptLegacyPass - OpenMP specific optimizations.
-Pass *createOpenMPOptCGSCCLegacyPass();
 
 //===----------------------------------------------------------------------===//
 /// createIPSCCPPass - This pass propagates constants from call sites into the
@@ -241,10 +229,6 @@ ModulePass *createCrossDSOCFIPass();
 /// This pass splits globals into pieces for the benefit of whole-program
 /// devirtualization and control-flow integrity.
 ModulePass *createGlobalSplitPass();
-
-/// Write ThinLTO-ready bitcode to Str.
-ModulePass *createWriteThinLTOBitcodePass(raw_ostream &Str,
-                                          raw_ostream *ThinLinkOS = nullptr);
 
 } // End llvm namespace
 

@@ -167,18 +167,18 @@ std::string ForestNode::dumpRecursive(const Grammar &G,
             LineDec.Subsequent = "│ ";
           }
           Dump(Children[I], P->kind() == Sequence ? EndOfElement(I) : End,
-               llvm::None, LineDec);
+               std::nullopt, LineDec);
         }
         LineDec.Prefix.resize(OldPrefixSize);
       };
   LineDecoration LineDec;
-  Dump(this, KEnd, llvm::None, LineDec);
+  Dump(this, KEnd, std::nullopt, LineDec);
   return Result;
 }
 
 llvm::ArrayRef<ForestNode>
 ForestArena::createTerminals(const TokenStream &Code) {
-  ForestNode *Terminals = Arena.Allocate<ForestNode>(Code.tokens().size());
+  ForestNode *Terminals = Arena.Allocate<ForestNode>(Code.tokens().size() + 1);
   size_t Index = 0;
   for (const auto &T : Code.tokens()) {
     new (&Terminals[Index])
@@ -186,6 +186,12 @@ ForestArena::createTerminals(const TokenStream &Code) {
                    /*Start=*/Index, /*TerminalData*/ 0);
     ++Index;
   }
+  // Include an `eof` terminal.
+  // This is important to drive the final shift/recover/reduce loop.
+  new (&Terminals[Index])
+      ForestNode(ForestNode::Terminal, tokenSymbol(tok::eof),
+                 /*Start=*/Index, /*TerminalData*/ 0);
+  ++Index;
   NodeCount = Index;
   return llvm::makeArrayRef(Terminals, Index);
 }

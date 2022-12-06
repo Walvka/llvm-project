@@ -381,8 +381,7 @@ bool Sema::inferCUDATargetForImplicitSpecialMember(CXXRecordDecl *ClassDecl,
       InferredTarget = BaseMethodTarget;
     } else {
       bool ResolutionError = resolveCalleeCUDATargetConflict(
-          InferredTarget.value(), BaseMethodTarget,
-          InferredTarget.getPointer());
+          InferredTarget.value(), BaseMethodTarget, &*InferredTarget);
       if (ResolutionError) {
         if (Diagnose) {
           Diag(ClassDecl->getLocation(),
@@ -425,8 +424,7 @@ bool Sema::inferCUDATargetForImplicitSpecialMember(CXXRecordDecl *ClassDecl,
       InferredTarget = FieldMethodTarget;
     } else {
       bool ResolutionError = resolveCalleeCUDATargetConflict(
-          InferredTarget.value(), FieldMethodTarget,
-          InferredTarget.getPointer());
+          InferredTarget.value(), FieldMethodTarget, &*InferredTarget);
       if (ResolutionError) {
         if (Diagnose) {
           Diag(ClassDecl->getLocation(),
@@ -714,7 +712,7 @@ void Sema::MaybeAddCUDAConstantAttr(VarDecl *VD) {
   // Do not promote dependent variables since the cotr/dtor/initializer are
   // not determined. Do it after instantiation.
   if (getLangOpts().CUDAIsDevice && !VD->hasAttr<CUDAConstantAttr>() &&
-      !VD->hasAttr<CUDAConstantAttr>() && !VD->hasAttr<CUDASharedAttr>() &&
+      !VD->hasAttr<CUDASharedAttr>() &&
       (VD->isFileVarDecl() || VD->isStaticDataMember()) &&
       !IsDependentVar(VD) &&
       ((VD->isConstexpr() || VD->getType().isConstQualified()) &&

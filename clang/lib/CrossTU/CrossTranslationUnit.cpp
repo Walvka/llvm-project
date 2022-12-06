@@ -458,7 +458,7 @@ CrossTranslationUnitContext::ASTUnitStorage::getASTUnitForFunction(
       return llvm::make_error<IndexError>(index_error_code::missing_definition);
     }
 
-    // Search in the index for the filename where the definition of FuncitonName
+    // Search in the index for the filename where the definition of FunctionName
     // resides.
     if (llvm::Expected<ASTUnit *> FoundForFile =
             getASTUnitForFile(NameFileMap[FunctionName], DisplayCTUProgress)) {
@@ -797,7 +797,7 @@ llvm::Optional<clang::MacroExpansionContext>
 CrossTranslationUnitContext::getMacroExpansionContextForSourceLocation(
     const clang::SourceLocation &ToLoc) const {
   // FIXME: Implement: Record such a context for every imported ASTUnit; lookup.
-  return llvm::None;
+  return std::nullopt;
 }
 
 bool CrossTranslationUnitContext::isImportedAsNew(const Decl *ToDecl) const {

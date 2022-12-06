@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeGenModule.h"
+#include "ABIInfo.h"
 #include "CGBlocks.h"
 #include "CGCUDARuntime.h"
 #include "CGCXXABI.h"
@@ -32,7 +33,6 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Mangle.h"
-#include "clang/AST/RecordLayout.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Builtins.h"
@@ -47,6 +47,8 @@
 #include "clang/CodeGen/BackendUtil.h"
 #include "clang/CodeGen/ConstantInitBuilder.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -58,14 +60,15 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ProfileSummary.h"
 #include "llvm/ProfileData/InstrProfReader.h"
+#include "llvm/ProfileData/SampleProf.h"
 #include "llvm/Support/CRC.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/MD5.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/X86TargetParser.h"
+#include "llvm/Support/xxhash.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -96,16 +99,18 @@ static CGCXXABI *createCXXABI(CodeGenModule &CGM) {
   llvm_unreachable("invalid C++ ABI kind");
 }
 
-CodeGenModule::CodeGenModule(ASTContext &C, const HeaderSearchOptions &HSO,
+CodeGenModule::CodeGenModule(ASTContext &C,
+                             IntrusiveRefCntPtr<llvm::vfs::FileSystem> FS,
+                             const HeaderSearchOptions &HSO,
                              const PreprocessorOptions &PPO,
                              const CodeGenOptions &CGO, llvm::Module &M,
                              DiagnosticsEngine &diags,
                              CoverageSourceInfo *CoverageInfo)
-    : Context(C), LangOpts(C.getLangOpts()), HeaderSearchOpts(HSO),
-      PreprocessorOpts(PPO), CodeGenOpts(CGO), TheModule(M), Diags(diags),
-      Target(C.getTargetInfo()), ABI(createCXXABI(*this)),
-      VMContext(M.getContext()), Types(*this), VTables(*this),
-      SanitizerMD(new SanitizerMetadata(*this)) {
+    : Context(C), LangOpts(C.getLangOpts()), FS(std::move(FS)),
+      HeaderSearchOpts(HSO), PreprocessorOpts(PPO), CodeGenOpts(CGO),
+      TheModule(M), Diags(diags), Target(C.getTargetInfo()),
+      ABI(createCXXABI(*this)), VMContext(M.getContext()), Types(*this),
+      VTables(*this), SanitizerMD(new SanitizerMetadata(*this)) {
 
   // Initialize the type cache.
   llvm::LLVMContext &LLVMContext = M.getContext();
@@ -118,9 +123,10 @@ CodeGenModule::CodeGenModule(ASTContext &C, const HeaderSearchOptions &HSO,
   BFloatTy = llvm::Type::getBFloatTy(LLVMContext);
   FloatTy = llvm::Type::getFloatTy(LLVMContext);
   DoubleTy = llvm::Type::getDoubleTy(LLVMContext);
-  PointerWidthInBits = C.getTargetInfo().getPointerWidth(0);
+  PointerWidthInBits = C.getTargetInfo().getPointerWidth(LangAS::Default);
   PointerAlignInBytes =
-    C.toCharUnitsFromBits(C.getTargetInfo().getPointerAlign(0)).getQuantity();
+      C.toCharUnitsFromBits(C.getTargetInfo().getPointerAlign(LangAS::Default))
+          .getQuantity();
   SizeSizeInBytes =
     C.toCharUnitsFromBits(C.getTargetInfo().getMaxPointerWidth()).getQuantity();
   IntAlignInBytes =
@@ -136,6 +142,13 @@ CodeGenModule::CodeGenModule(ASTContext &C, const HeaderSearchOptions &HSO,
   AllocaInt8PtrTy = Int8Ty->getPointerTo(DL.getAllocaAddrSpace());
   GlobalsInt8PtrTy = Int8Ty->getPointerTo(DL.getDefaultGlobalsAddressSpace());
   ASTAllocaAddressSpace = getTargetCodeGenInfo().getASTAllocaAddressSpace();
+
+  // Build C++20 Module initializers.
+  // TODO: Add Microsoft here once we know the mangling required for the
+  // initializers.
+  CXX20ModuleInits =
+      LangOpts.CPlusPlusModules && getCXXABI().getMangleContext().getKind() ==
+                                       ItaniumMangleContext::MK_Itanium;
 
   RuntimeCC = getTargetCodeGenInfo().getABIInfo().getRuntimeCC();
 
@@ -170,15 +183,11 @@ CodeGenModule::CodeGenModule(ASTContext &C, const HeaderSearchOptions &HSO,
   if (CodeGenOpts.hasProfileClangUse()) {
     auto ReaderOrErr = llvm::IndexedInstrProfReader::create(
         CodeGenOpts.ProfileInstrumentUsePath, CodeGenOpts.ProfileRemappingFile);
-    if (auto E = ReaderOrErr.takeError()) {
-      unsigned DiagID = Diags.getCustomDiagID(DiagnosticsEngine::Error,
-                                              "Could not read profile %0: %1");
-      llvm::handleAllErrors(std::move(E), [&](const llvm::ErrorInfoBase &EI) {
-        getDiags().Report(DiagID) << CodeGenOpts.ProfileInstrumentUsePath
-                                  << EI.message();
-      });
-    } else
-      PGOReader = std::move(ReaderOrErr.get());
+    // We're checking for profile read errors in CompilerInvocation, so if
+    // there was an error it should've already been caught. If it hasn't been
+    // somehow, trip an assertion.
+    assert(ReaderOrErr);
+    PGOReader = std::move(ReaderOrErr.get());
   }
 
   // If coverage mapping generation is enabled, create the
@@ -196,22 +205,7 @@ CodeGenModule::CodeGenModule(ASTContext &C, const HeaderSearchOptions &HSO,
         Path = Entry.second + Path.substr(Entry.first.size());
         break;
       }
-    llvm::MD5 Md5;
-    Md5.update(Path);
-    llvm::MD5::MD5Result R;
-    Md5.final(R);
-    SmallString<32> Str;
-    llvm::MD5::stringifyResult(R, Str);
-    // Convert MD5hash to Decimal. Demangler suffixes can either contain
-    // numbers or characters but not both.
-    llvm::APInt IntHash(128, Str.str(), 16);
-    // Prepend "__uniq" before the hash for tools like profilers to understand
-    // that this symbol is of internal linkage type.  The "__uniq" is the
-    // pre-determined prefix that is used to tell tools that this symbol was
-    // created with -funique-internal-linakge-symbols and the tools can strip or
-    // keep the prefix as needed.
-    ModuleNameHash = (Twine(".__uniq.") +
-        Twine(toString(IntHash, /* Radix = */ 10, /* Signed = */false))).str();
+    ModuleNameHash = llvm::getUniqueInternalLinkagePostfix(Path);
   }
 }
 
@@ -511,6 +505,9 @@ static void setVisibilityFromDLLStorageClass(const clang::LangOptions &LO,
 }
 
 void CodeGenModule::Release() {
+  Module *Primary = getContext().getModuleForCodeGen();
+  if (CXX20ModuleInits && Primary && !Primary->isHeaderLikeModule())
+    EmitModuleInitializers(Primary);
   EmitDeferred();
   DeferredDecls.insert(EmittedDeferredDecls.begin(),
                        EmittedDeferredDecls.end());
@@ -519,7 +516,18 @@ void CodeGenModule::Release() {
   applyGlobalValReplacements();
   applyReplacements();
   emitMultiVersionFunctions();
-  EmitCXXGlobalInitFunc();
+
+  if (Context.getLangOpts().IncrementalExtensions &&
+      GlobalTopLevelStmtBlockInFlight.first) {
+    const TopLevelStmtDecl *TLSD = GlobalTopLevelStmtBlockInFlight.second;
+    GlobalTopLevelStmtBlockInFlight.first->FinishFunction(TLSD->getEndLoc());
+    GlobalTopLevelStmtBlockInFlight = {nullptr, nullptr};
+  }
+
+  if (CXX20ModuleInits && Primary && Primary->isInterfaceOrPartition())
+    EmitCXXModuleInitFunc(Primary);
+  else
+    EmitCXXGlobalInitFunc();
   EmitCXXGlobalCleanUpFunc();
   registerGlobalDtorsWithAtExit();
   EmitCXXThreadLocalInitFunc();
@@ -545,6 +553,9 @@ void CodeGenModule::Release() {
     if (PGOStats.hasDiagnostics())
       PGOStats.reportDiagnostics(getDiags(), getCodeGenOpts().MainFileName);
   }
+  llvm::stable_sort(GlobalCtors, [](const Structor &L, const Structor &R) {
+    return L.LexOrder < R.LexOrder;
+  });
   EmitCtorList(GlobalCtors, "llvm.global_ctors");
   EmitCtorList(GlobalDtors, "llvm.global_dtors");
   EmitGlobalAnnotations();
@@ -558,6 +569,8 @@ void CodeGenModule::Release() {
     CodeGenFunction(*this).EmitCfiCheckFail();
     CodeGenFunction(*this).EmitCfiCheckStub();
   }
+  if (LangOpts.Sanitize.has(SanitizerKind::KCFI))
+    finalizeKCFITypes();
   emitAtAvailableLinkGuard();
   if (Context.getTargetInfo().getTriple().isWasm())
     EmitMainVoidAlias();
@@ -579,9 +592,8 @@ void CodeGenModule::Release() {
     }
     // Emit amdgpu_code_object_version module flag, which is code object version
     // times 100.
-    // ToDo: Enable module flag for all code object version when ROCm device
-    // library is ready.
-    if (getTarget().getTargetOpts().CodeObjectVersion == TargetOptions::COV_5) {
+    if (getTarget().getTargetOpts().CodeObjectVersion !=
+        TargetOptions::COV_None) {
       getModule().addModuleFlag(llvm::Module::Error,
                                 "amdgpu_code_object_version",
                                 getTarget().getTargetOpts().CodeObjectVersion);
@@ -674,6 +686,10 @@ void CodeGenModule::Release() {
     // Function ID tables for EH Continuation Guard.
     getModule().addModuleFlag(llvm::Module::Warning, "ehcontguard", 1);
   }
+  if (Context.getLangOpts().Kernel) {
+    // Note if we are compiling with /kernel.
+    getModule().addModuleFlag(llvm::Module::Warning, "ms-kernel", 1);
+  }
   if (CodeGenOpts.OptimizationLevel > 0 && CodeGenOpts.StrictVTablePointers) {
     // We don't support LTO with 2 with different StrictVTablePointers
     // FIXME: we could support it by stripping all the information introduced
@@ -740,6 +756,9 @@ void CodeGenModule::Release() {
                               CodeGenOpts.SanitizeCfiCanonicalJumpTables);
   }
 
+  if (LangOpts.Sanitize.has(SanitizerKind::KCFI))
+    getModule().addModuleFlag(llvm::Module::Override, "kcfi", 1);
+
   if (CodeGenOpts.CFProtectionReturn &&
       Target.checkCFProtectionReturnSupported(getDiags())) {
     // Indicate that we want to instrument return control flow protection.
@@ -759,6 +778,9 @@ void CodeGenModule::Release() {
 
   if (CodeGenOpts.FunctionReturnThunks)
     getModule().addModuleFlag(llvm::Module::Override, "function_return_thunk_extern", 1);
+
+  if (CodeGenOpts.IndirectBranchCSPrefix)
+    getModule().addModuleFlag(llvm::Module::Override, "indirect_branch_cs_prefix", 1);
 
   // Add module metadata for return address signing (ignoring
   // non-leaf/all) and stack tagging. These are actually turned on by function
@@ -782,18 +804,17 @@ void CodeGenModule::Release() {
       Arch == llvm::Triple::arm || Arch == llvm::Triple::armeb ||
       Arch == llvm::Triple::aarch64 || Arch == llvm::Triple::aarch64_32 ||
       Arch == llvm::Triple::aarch64_be) {
-    getModule().addModuleFlag(llvm::Module::Min, "branch-target-enforcement",
-                              LangOpts.BranchTargetEnforcement);
-
-    getModule().addModuleFlag(llvm::Module::Min, "sign-return-address",
-                              LangOpts.hasSignReturnAddress());
-
-    getModule().addModuleFlag(llvm::Module::Min, "sign-return-address-all",
-                              LangOpts.isSignReturnAddressScopeAll());
-
-    getModule().addModuleFlag(llvm::Module::Min,
-                              "sign-return-address-with-bkey",
-                              !LangOpts.isSignReturnAddressWithAKey());
+    if (LangOpts.BranchTargetEnforcement)
+      getModule().addModuleFlag(llvm::Module::Min, "branch-target-enforcement",
+                                1);
+    if (LangOpts.hasSignReturnAddress())
+      getModule().addModuleFlag(llvm::Module::Min, "sign-return-address", 1);
+    if (LangOpts.isSignReturnAddressScopeAll())
+      getModule().addModuleFlag(llvm::Module::Min, "sign-return-address-all",
+                                1);
+    if (!LangOpts.isSignReturnAddressWithAKey())
+      getModule().addModuleFlag(llvm::Module::Min,
+                                "sign-return-address-with-bkey", 1);
   }
 
   if (!CodeGenOpts.MemoryProfileOutput.empty()) {
@@ -951,14 +972,9 @@ void CodeGenModule::EmitOpenCLMetadata() {
 
 void CodeGenModule::EmitBackendOptionsMetadata(
     const CodeGenOptions CodeGenOpts) {
-  switch (getTriple().getArch()) {
-  default:
-    break;
-  case llvm::Triple::riscv32:
-  case llvm::Triple::riscv64:
+  if (getTriple().isRISCV()) {
     getModule().addModuleFlag(llvm::Module::Error, "SmallDataLimit",
                               CodeGenOpts.SmallDataLimit);
-    break;
   }
 }
 
@@ -1087,8 +1103,6 @@ llvm::ConstantInt *CodeGenModule::getSize(CharUnits size) {
 
 void CodeGenModule::setGlobalVisibility(llvm::GlobalValue *GV,
                                         const NamedDecl *D) const {
-  if (GV->hasDLLImportStorageClass())
-    return;
   // Internal definitions always have default visibility.
   if (GV->hasLocalLinkage()) {
     GV->setVisibility(llvm::GlobalValue::DefaultVisibility);
@@ -1099,6 +1113,21 @@ void CodeGenModule::setGlobalVisibility(llvm::GlobalValue *GV,
   // Set visibility for definitions, and for declarations if requested globally
   // or set explicitly.
   LinkageInfo LV = D->getLinkageAndVisibility();
+  if (GV->hasDLLExportStorageClass() || GV->hasDLLImportStorageClass()) {
+    // Reject incompatible dlllstorage and visibility annotations.
+    if (!LV.isVisibilityExplicit())
+      return;
+    if (GV->hasDLLExportStorageClass()) {
+      if (LV.getVisibility() == HiddenVisibility)
+        getDiags().Report(D->getLocation(),
+                          diag::err_hidden_visibility_dllexport);
+    } else if (LV.getVisibility() != DefaultVisibility) {
+      getDiags().Report(D->getLocation(),
+                        diag::err_non_default_visibility_dllimport);
+    }
+    return;
+  }
+
   if (LV.isVisibilityExplicit() || getLangOpts().SetVisibilityForExternDecls ||
       !GV->isDeclarationForLinker())
     GV->setVisibility(GetLLVMVisibility(LV.getVisibility()));
@@ -1313,21 +1342,21 @@ static void AppendTargetMangling(const CodeGenModule &CGM,
 
   Out << '.';
   const TargetInfo &Target = CGM.getTarget();
-  ParsedTargetAttr Info =
-      Attr->parse([&Target](StringRef LHS, StringRef RHS) {
-        // Multiversioning doesn't allow "no-${feature}", so we can
-        // only have "+" prefixes here.
-        assert(LHS.startswith("+") && RHS.startswith("+") &&
-               "Features should always have a prefix.");
-        return Target.multiVersionSortPriority(LHS.substr(1)) >
-               Target.multiVersionSortPriority(RHS.substr(1));
-      });
+  ParsedTargetAttr Info = Target.parseTargetAttr(Attr->getFeaturesStr());
+  llvm::sort(Info.Features, [&Target](StringRef LHS, StringRef RHS) {
+    // Multiversioning doesn't allow "no-${feature}", so we can
+    // only have "+" prefixes here.
+    assert(LHS.startswith("+") && RHS.startswith("+") &&
+           "Features should always have a prefix.");
+    return Target.multiVersionSortPriority(LHS.substr(1)) >
+           Target.multiVersionSortPriority(RHS.substr(1));
+  });
 
   bool IsFirst = true;
 
-  if (!Info.Architecture.empty()) {
+  if (!Info.CPU.empty()) {
     IsFirst = false;
-    Out << "arch_" << Info.Architecture;
+    Out << "arch_" << Info.CPU;
   }
 
   for (StringRef Feat : Info.Features) {
@@ -1567,9 +1596,10 @@ llvm::GlobalValue *CodeGenModule::GetGlobalValue(StringRef Name) {
 /// AddGlobalCtor - Add a function to the list that will be called before
 /// main() runs.
 void CodeGenModule::AddGlobalCtor(llvm::Function *Ctor, int Priority,
+                                  unsigned LexOrder,
                                   llvm::Constant *AssociatedData) {
   // FIXME: Type coercion of void()* types.
-  GlobalCtors.push_back(Structor(Priority, Ctor, AssociatedData));
+  GlobalCtors.push_back(Structor(Priority, LexOrder, Ctor, AssociatedData));
 }
 
 /// AddGlobalDtor - Add a function to the list that will be called
@@ -1583,7 +1613,7 @@ void CodeGenModule::AddGlobalDtor(llvm::Function *Dtor, int Priority,
   }
 
   // FIXME: Type coercion of void()* types.
-  GlobalDtors.push_back(Structor(Priority, Dtor, nullptr));
+  GlobalDtors.push_back(Structor(Priority, ~0U, Dtor, nullptr));
 }
 
 void CodeGenModule::EmitCtorList(CtorList &Fns, const char *GlobalName) {
@@ -1619,7 +1649,7 @@ void CodeGenModule::EmitCtorList(CtorList &Fns, const char *GlobalName) {
 
   // The LTO linker doesn't seem to like it when we set an alignment
   // on appending variables.  Take it off as a workaround.
-  list->setAlignment(llvm::None);
+  list->setAlignment(std::nullopt);
 
   Fns.clear();
 }
@@ -1650,6 +1680,20 @@ llvm::ConstantInt *CodeGenModule::CreateCrossDsoCfiTypeId(llvm::Metadata *MD) {
   if (!MDS) return nullptr;
 
   return llvm::ConstantInt::get(Int64Ty, llvm::MD5Hash(MDS->getString()));
+}
+
+llvm::ConstantInt *CodeGenModule::CreateKCFITypeId(QualType T) {
+  if (auto *FnType = T->getAs<FunctionProtoType>())
+    T = getContext().getFunctionType(
+        FnType->getReturnType(), FnType->getParamTypes(),
+        FnType->getExtProtoInfo().withExceptionSpec(EST_None));
+
+  std::string OutName;
+  llvm::raw_string_ostream Out(OutName);
+  getCXXABI().getMangleContext().mangleTypeName(T, Out);
+
+  return llvm::ConstantInt::get(Int32Ty,
+                                static_cast<uint32_t>(llvm::xxHash64(OutName)));
 }
 
 void CodeGenModule::SetLLVMFunctionAttributes(GlobalDecl GD,
@@ -1751,7 +1795,7 @@ void CodeGenModule::GenKernelArgMetadata(llvm::Function *Fn,
       // Get image and pipe access qualifier:
       if (ty->isImageType() || ty->isPipeType()) {
         const Decl *PDecl = parm;
-        if (auto *TD = dyn_cast<TypedefType>(ty))
+        if (const auto *TD = ty->getAs<TypedefType>())
           PDecl = TD->getDecl();
         const OpenCLAccessAttr *A = PDecl->getAttr<OpenCLAccessAttr>();
         if (A && A->isWriteOnly())
@@ -1921,7 +1965,7 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
                                                            llvm::Function *F) {
   llvm::AttrBuilder B(F->getContext());
 
-  if (CodeGenOpts.UnwindTables)
+  if ((!D || !D->hasAttr<NoUwtableAttr>()) && CodeGenOpts.UnwindTables)
     B.addUWTableAttr(llvm::UWTableKind(CodeGenOpts.UnwindTables));
 
   if (CodeGenOpts.StackClashProtector)
@@ -1930,14 +1974,17 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
   if (!hasUnwindExceptions(LangOpts))
     B.addAttribute(llvm::Attribute::NoUnwind);
 
-  if (!D || !D->hasAttr<NoStackProtectorAttr>()) {
-    if (LangOpts.getStackProtector() == LangOptions::SSPOn)
-      B.addAttribute(llvm::Attribute::StackProtect);
-    else if (LangOpts.getStackProtector() == LangOptions::SSPStrong)
-      B.addAttribute(llvm::Attribute::StackProtectStrong);
-    else if (LangOpts.getStackProtector() == LangOptions::SSPReq)
-      B.addAttribute(llvm::Attribute::StackProtectReq);
-  }
+  if (D && D->hasAttr<NoStackProtectorAttr>())
+    ; // Do nothing.
+  else if (D && D->hasAttr<StrictGuardStackCheckAttr>() &&
+           LangOpts.getStackProtector() == LangOptions::SSPOn)
+    B.addAttribute(llvm::Attribute::StackProtectStrong);
+  else if (LangOpts.getStackProtector() == LangOptions::SSPOn)
+    B.addAttribute(llvm::Attribute::StackProtect);
+  else if (LangOpts.getStackProtector() == LangOptions::SSPStrong)
+    B.addAttribute(llvm::Attribute::StackProtectStrong);
+  else if (LangOpts.getStackProtector() == LangOptions::SSPReq)
+    B.addAttribute(llvm::Attribute::StackProtectReq);
 
   if (!D) {
     // If we don't have a declaration to control inlining, the function isn't
@@ -2133,10 +2180,11 @@ bool CodeGenModule::GetCPUAndFeaturesAttributes(GlobalDecl GD,
     // get and parse the target attribute so we can get the cpu for
     // the function.
     if (TD) {
-      ParsedTargetAttr ParsedAttr = TD->parse();
-      if (!ParsedAttr.Architecture.empty() &&
-          getTarget().isValidCPUName(ParsedAttr.Architecture)) {
-        TargetCPU = ParsedAttr.Architecture;
+      ParsedTargetAttr ParsedAttr =
+          Target.parseTargetAttr(TD->getFeaturesStr());
+      if (!ParsedAttr.CPU.empty() &&
+          getTarget().isValidCPUName(ParsedAttr.CPU)) {
+        TargetCPU = ParsedAttr.CPU;
         TuneCPU = ""; // Clear the tune CPU.
       }
       if (!ParsedAttr.Tune.empty() &&
@@ -2266,6 +2314,57 @@ void CodeGenModule::CreateFunctionTypeMetadataForIcall(const FunctionDecl *FD,
       F->addTypeMetadata(0, llvm::ConstantAsMetadata::get(CrossDsoTypeId));
 }
 
+void CodeGenModule::setKCFIType(const FunctionDecl *FD, llvm::Function *F) {
+  if (isa<CXXMethodDecl>(FD) && !cast<CXXMethodDecl>(FD)->isStatic())
+    return;
+
+  llvm::LLVMContext &Ctx = F->getContext();
+  llvm::MDBuilder MDB(Ctx);
+  F->setMetadata(llvm::LLVMContext::MD_kcfi_type,
+                 llvm::MDNode::get(
+                     Ctx, MDB.createConstant(CreateKCFITypeId(FD->getType()))));
+}
+
+static bool allowKCFIIdentifier(StringRef Name) {
+  // KCFI type identifier constants are only necessary for external assembly
+  // functions, which means it's safe to skip unusual names. Subset of
+  // MCAsmInfo::isAcceptableChar() and MCAsmInfoXCOFF::isAcceptableChar().
+  return llvm::all_of(Name, [](const char &C) {
+    return llvm::isAlnum(C) || C == '_' || C == '.';
+  });
+}
+
+void CodeGenModule::finalizeKCFITypes() {
+  llvm::Module &M = getModule();
+  for (auto &F : M.functions()) {
+    // Remove KCFI type metadata from non-address-taken local functions.
+    bool AddressTaken = F.hasAddressTaken();
+    if (!AddressTaken && F.hasLocalLinkage())
+      F.eraseMetadata(llvm::LLVMContext::MD_kcfi_type);
+
+    // Generate a constant with the expected KCFI type identifier for all
+    // address-taken function declarations to support annotating indirectly
+    // called assembly functions.
+    if (!AddressTaken || !F.isDeclaration())
+      continue;
+
+    const llvm::ConstantInt *Type;
+    if (const llvm::MDNode *MD = F.getMetadata(llvm::LLVMContext::MD_kcfi_type))
+      Type = llvm::mdconst::extract<llvm::ConstantInt>(MD->getOperand(0));
+    else
+      continue;
+
+    StringRef Name = F.getName();
+    if (!allowKCFIIdentifier(Name))
+      continue;
+
+    std::string Asm = (".weak __kcfi_typeid_" + Name + "\n.set __kcfi_typeid_" +
+                       Name + ", " + Twine(Type->getZExtValue()) + "\n")
+                          .str();
+    M.appendModuleInlineAsm(Asm);
+  }
+}
+
 void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
                                           bool IsIncompleteFunction,
                                           bool IsThunk) {
@@ -2348,8 +2447,14 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
       !CodeGenOpts.SanitizeCfiCanonicalJumpTables)
     CreateFunctionTypeMetadataForIcall(FD, F);
 
+  if (LangOpts.Sanitize.has(SanitizerKind::KCFI))
+    setKCFIType(FD, F);
+
   if (getLangOpts().OpenMP && FD->hasAttr<OMPDeclareSimdDeclAttr>())
     getOpenMPRuntime().emitDeclareSimdFunction(FD, F);
+
+  if (CodeGenOpts.InlineMaxStackSize != UINT_MAX)
+    F->addFnAttr("inline-max-stacksize", llvm::utostr(CodeGenOpts.InlineMaxStackSize));
 
   if (const auto *CB = FD->getAttr<CallbackAttr>()) {
     // Annotate the callback behavior as metadata:
@@ -2498,6 +2603,33 @@ static void addLinkOptionsPostorder(CodeGenModule &CGM, Module *Mod,
       CGM.getTargetCodeGenInfo().getDependentLibraryOption(LL.Library, Opt);
       auto *OptString = llvm::MDString::get(Context, Opt);
       Metadata.push_back(llvm::MDNode::get(Context, OptString));
+    }
+  }
+}
+
+void CodeGenModule::EmitModuleInitializers(clang::Module *Primary) {
+  // Emit the initializers in the order that sub-modules appear in the
+  // source, first Global Module Fragments, if present.
+  if (auto GMF = Primary->getGlobalModuleFragment()) {
+    for (Decl *D : getContext().getModuleInitializers(GMF)) {
+      if (isa<ImportDecl>(D))
+        continue;
+      assert(isa<VarDecl>(D) && "GMF initializer decl is not a var?");
+      EmitTopLevelDecl(D);
+    }
+  }
+  // Second any associated with the module, itself.
+  for (Decl *D : getContext().getModuleInitializers(Primary)) {
+    // Skip import decls, the inits for those are called explicitly.
+    if (isa<ImportDecl>(D))
+      continue;
+    EmitTopLevelDecl(D);
+  }
+  // Third any associated with the Privat eMOdule Fragment, if present.
+  if (auto PMF = Primary->getPrivateModuleFragment()) {
+    for (Decl *D : getContext().getModuleInitializers(PMF)) {
+      assert(isa<VarDecl>(D) && "PMF initializer decl is not a var?");
+      EmitTopLevelDecl(D);
     }
   }
 }
@@ -2851,46 +2983,44 @@ bool CodeGenModule::imbueXRayAttrs(llvm::Function *Fn, SourceLocation Loc,
   return true;
 }
 
-bool CodeGenModule::isFunctionBlockedByProfileList(llvm::Function *Fn,
-                                                   SourceLocation Loc) const {
+ProfileList::ExclusionType
+CodeGenModule::isFunctionBlockedByProfileList(llvm::Function *Fn,
+                                              SourceLocation Loc) const {
   const auto &ProfileList = getContext().getProfileList();
   // If the profile list is empty, then instrument everything.
   if (ProfileList.isEmpty())
-    return false;
+    return ProfileList::Allow;
   CodeGenOptions::ProfileInstrKind Kind = getCodeGenOpts().getProfileInstr();
   // First, check the function name.
-  Optional<bool> V = ProfileList.isFunctionExcluded(Fn->getName(), Kind);
-  if (V)
+  if (auto V = ProfileList.isFunctionExcluded(Fn->getName(), Kind))
     return *V;
   // Next, check the source location.
-  if (Loc.isValid()) {
-    Optional<bool> V = ProfileList.isLocationExcluded(Loc, Kind);
-    if (V)
+  if (Loc.isValid())
+    if (auto V = ProfileList.isLocationExcluded(Loc, Kind))
       return *V;
-  }
   // If location is unknown, this may be a compiler-generated function. Assume
   // it's located in the main file.
   auto &SM = Context.getSourceManager();
-  if (const auto *MainFile = SM.getFileEntryForID(SM.getMainFileID())) {
-    Optional<bool> V = ProfileList.isFileExcluded(MainFile->getName(), Kind);
-    if (V)
+  if (const auto *MainFile = SM.getFileEntryForID(SM.getMainFileID()))
+    if (auto V = ProfileList.isFileExcluded(MainFile->getName(), Kind))
       return *V;
-  }
-  return ProfileList.getDefault();
+  return ProfileList.getDefault(Kind);
 }
 
-bool CodeGenModule::isFunctionBlockedFromProfileInstr(
-    llvm::Function *Fn, SourceLocation Loc) const {
-  if (isFunctionBlockedByProfileList(Fn, Loc))
-    return true;
+ProfileList::ExclusionType
+CodeGenModule::isFunctionBlockedFromProfileInstr(llvm::Function *Fn,
+                                                 SourceLocation Loc) const {
+  auto V = isFunctionBlockedByProfileList(Fn, Loc);
+  if (V != ProfileList::Allow)
+    return V;
 
   auto NumGroups = getCodeGenOpts().ProfileTotalFunctionGroups;
   if (NumGroups > 1) {
     auto Group = llvm::crc32(arrayRefFromStringRef(Fn->getName())) % NumGroups;
     if (Group != getCodeGenOpts().ProfileSelectedFunctionGroup)
-      return true;
+      return ProfileList::Skip;
   }
-  return false;
+  return ProfileList::Allow;
 }
 
 bool CodeGenModule::MustBeEmitted(const ValueDecl *Global) {
@@ -2928,12 +3058,20 @@ bool CodeGenModule::MayBeEmittedEagerly(const ValueDecl *Global) {
       // explicitly instantiated, so they should not be emitted eagerly.
       return false;
   }
-  if (const auto *VD = dyn_cast<VarDecl>(Global))
+  if (const auto *VD = dyn_cast<VarDecl>(Global)) {
     if (Context.getInlineVariableDefinitionKind(VD) ==
         ASTContext::InlineVariableDefinitionKind::WeakUnknown)
       // A definition of an inline constexpr static data member may change
       // linkage later if it's redeclared outside the class.
       return false;
+    if (CXX20ModuleInits && VD->getOwningModule() &&
+        !VD->getOwningModule()->isModuleMapModule()) {
+      // For CXX20, module-owned initializers need to be deferred, since it is
+      // not known at this point if they will be run for the current module or
+      // as part of the initializer for an imported one.
+      return false;
+    }
+  }
   // If OpenMP is enabled and threadprivates must be generated like TLS, delay
   // codegen for global variables, because they may be marked as threadprivate.
   if (LangOpts.OpenMP && LangOpts.OpenMPUseTLS &&
@@ -3066,7 +3204,7 @@ ConstantAddress CodeGenModule::GetWeakRefReference(const ValueDecl *VD) {
   // See if there is already something with the target's name in the module.
   llvm::GlobalValue *Entry = GetGlobalValue(AA->getAliasee());
   if (Entry) {
-    unsigned AS = getContext().getTargetAddressSpace(VD->getType());
+    unsigned AS = getTypes().getTargetAddressSpace(VD->getType());
     auto Ptr = llvm::ConstantExpr::getBitCast(Entry, DeclTy->getPointerTo(AS));
     return ConstantAddress(Ptr, DeclTy, Alignment);
   }
@@ -3176,12 +3314,14 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
                 OMPDeclareTargetDeclAttr::isDeclareTargetDeclaration(VD)) {
           bool UnifiedMemoryEnabled =
               getOpenMPRuntime().hasRequiresUnifiedSharedMemory();
-          if (*Res == OMPDeclareTargetDeclAttr::MT_To &&
+          if ((*Res == OMPDeclareTargetDeclAttr::MT_To ||
+               *Res == OMPDeclareTargetDeclAttr::MT_Enter) &&
               !UnifiedMemoryEnabled) {
             (void)GetAddrOfGlobalVar(VD);
           } else {
             assert(((*Res == OMPDeclareTargetDeclAttr::MT_Link) ||
-                    (*Res == OMPDeclareTargetDeclAttr::MT_To &&
+                    ((*Res == OMPDeclareTargetDeclAttr::MT_To ||
+                      *Res == OMPDeclareTargetDeclAttr::MT_Enter) &&
                      UnifiedMemoryEnabled)) &&
                    "Link clause or to clause with unified memory expected.");
             (void)getOpenMPRuntime().getAddrOfDeclareTargetVar(VD);
@@ -3224,6 +3364,7 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
     // The value must be emitted, but cannot be emitted eagerly.
     assert(!MayBeEmittedEagerly(Global));
     addDeferredDeclToEmit(GD);
+    EmittedDeferredDecls[MangledName] = GD;
   } else {
     // Otherwise, remember that we saw a deferred decl with this name.  The
     // first use of the mangled name will cause it to move into
@@ -3628,7 +3769,7 @@ void CodeGenModule::emitCPUDispatchDefinition(GlobalDecl GD) {
   if (getTarget().supportsIFunc()) {
     ResolverType = llvm::FunctionType::get(
         llvm::PointerType::get(DeclTy,
-                               Context.getTargetAddressSpace(FD->getType())),
+                               getTypes().getTargetAddressSpace(FD->getType())),
         false);
   }
   else {
@@ -3766,8 +3907,8 @@ llvm::Constant *CodeGenModule::GetOrCreateMultiVersionResolver(GlobalDecl GD) {
   // cpu_dispatch will be emitted in this translation unit.
   if (getTarget().supportsIFunc() && !FD->isCPUSpecificMultiVersion()) {
     llvm::Type *ResolverType = llvm::FunctionType::get(
-        llvm::PointerType::get(
-            DeclTy, getContext().getTargetAddressSpace(FD->getType())),
+        llvm::PointerType::get(DeclTy,
+                               getTypes().getTargetAddressSpace(FD->getType())),
         false);
     llvm::Constant *Resolver = GetOrCreateLLVMFunction(
         MangledName + ".resolver", ResolverType, GlobalDecl{},
@@ -3870,7 +4011,8 @@ llvm::Constant *CodeGenModule::GetOrCreateLLVMFunction(
     // (If function is requested for a definition, we always need to create a new
     // function, not just return a bitcast.)
     if (!IsForDefinition)
-      return llvm::ConstantExpr::getBitCast(Entry, Ty->getPointerTo());
+      return llvm::ConstantExpr::getBitCast(
+          Entry, Ty->getPointerTo(Entry->getAddressSpace()));
   }
 
   // This function doesn't have a complete type (for example, the return
@@ -3927,7 +4069,7 @@ llvm::Constant *CodeGenModule::GetOrCreateLLVMFunction(
     // All MSVC dtors other than the base dtor are linkonce_odr and delegate to
     // each other bottoming out with the base dtor.  Therefore we emit non-base
     // dtors on usage, even if there is no dtor definition in the TU.
-    if (D && isa<CXXDestructorDecl>(D) &&
+    if (isa_and_nonnull<CXXDestructorDecl>(D) &&
         getCXXABI().useThunkForDtorVariant(cast<CXXDestructorDecl>(D),
                                            GD.getDtorType()))
       addDeferredDeclToEmit(GD);
@@ -3941,6 +4083,7 @@ llvm::Constant *CodeGenModule::GetOrCreateLLVMFunction(
       // DeferredDeclsToEmit list, and remove it from DeferredDecls (since we
       // don't need it anymore).
       addDeferredDeclToEmit(DDI->second);
+      EmittedDeferredDecls[DDI->first] = DDI->second;
       DeferredDecls.erase(DDI);
 
       // Otherwise, there are cases we have to worry about where we're
@@ -4222,6 +4365,7 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName, llvm::Type *Ty,
     // Move the potentially referenced deferred decl to the DeferredDeclsToEmit
     // list, and remove it from DeferredDecls (since we don't need it anymore).
     addDeferredDeclToEmit(DDI->second);
+    EmittedDeferredDecls[DDI->first] = DDI->second;
     DeferredDecls.erase(DDI);
   }
 
@@ -5284,7 +5428,7 @@ void CodeGenModule::EmitAliasDefinition(GlobalDecl GD) {
   // Emit global alias debug information.
   if (isa<VarDecl>(D))
     if (CGDebugInfo *DI = getModuleDebugInfo())
-      DI->EmitGlobalAlias(cast<llvm::GlobalValue>(GA->getAliasee()), GD);
+      DI->EmitGlobalAlias(cast<llvm::GlobalValue>(GA->getAliasee()->stripPointerCasts()), GD);
 }
 
 void CodeGenModule::emitIFuncDefinition(GlobalDecl GD) {
@@ -5421,7 +5565,7 @@ CodeGenModule::GetAddrOfConstantCFString(const StringLiteral *Literal) {
 
     switch (CFRuntime) {
     default: break;
-    case LangOptions::CoreFoundationABI::Swift: LLVM_FALLTHROUGH;
+    case LangOptions::CoreFoundationABI::Swift: [[fallthrough]];
     case LangOptions::CoreFoundationABI::Swift5_0:
       CFConstantStringClassName =
           Triple.isOSDarwin() ? "$s15SwiftFoundation19_NSCFConstantStringCN"
@@ -5882,10 +6026,13 @@ ConstantAddress CodeGenModule::GetAddrOfGlobalTemporary(
       getModule(), Type, Constant, Linkage, InitialValue, Name.c_str(),
       /*InsertBefore=*/nullptr, llvm::GlobalVariable::NotThreadLocal, TargetAS);
   if (emitter) emitter->finalize(GV);
-  setGVProperties(GV, VD);
-  if (GV->getDLLStorageClass() == llvm::GlobalVariable::DLLExportStorageClass)
-    // The reference temporary should never be dllexport.
-    GV->setDLLStorageClass(llvm::GlobalVariable::DefaultStorageClass);
+  // Don't assign dllimport or dllexport to local linkage globals.
+  if (!llvm::GlobalValue::isLocalLinkage(Linkage)) {
+    setGVProperties(GV, VD);
+    if (GV->getDLLStorageClass() == llvm::GlobalVariable::DLLExportStorageClass)
+      // The reference temporary should never be dllexport.
+      GV->setDLLStorageClass(llvm::GlobalVariable::DefaultStorageClass);
+  }
   GV->setAlignment(Align.getAsAlign());
   if (supportsCOMDAT() && GV->isWeakForLinker())
     GV->setComdat(TheModule.getOrInsertComdat(GV->getName()));
@@ -6011,6 +6158,39 @@ void CodeGenModule::EmitLinkageSpec(const LinkageSpecDecl *LSD) {
   EmitDeclContext(LSD);
 }
 
+void CodeGenModule::EmitTopLevelStmt(const TopLevelStmtDecl *D) {
+  std::unique_ptr<CodeGenFunction> &CurCGF =
+      GlobalTopLevelStmtBlockInFlight.first;
+
+  // We emitted a top-level stmt but after it there is initialization.
+  // Stop squashing the top-level stmts into a single function.
+  if (CurCGF && CXXGlobalInits.back() != CurCGF->CurFn) {
+    CurCGF->FinishFunction(D->getEndLoc());
+    CurCGF = nullptr;
+  }
+
+  if (!CurCGF) {
+    // void __stmts__N(void)
+    // FIXME: Ask the ABI name mangler to pick a name.
+    std::string Name = "__stmts__" + llvm::utostr(CXXGlobalInits.size());
+    FunctionArgList Args;
+    QualType RetTy = getContext().VoidTy;
+    const CGFunctionInfo &FnInfo =
+        getTypes().arrangeBuiltinFunctionDeclaration(RetTy, Args);
+    llvm::FunctionType *FnTy = getTypes().GetFunctionType(FnInfo);
+    llvm::Function *Fn = llvm::Function::Create(
+        FnTy, llvm::GlobalValue::InternalLinkage, Name, &getModule());
+
+    CurCGF.reset(new CodeGenFunction(*this));
+    GlobalTopLevelStmtBlockInFlight.second = D;
+    CurCGF->StartFunction(GlobalDecl(), RetTy, Fn, FnInfo, Args,
+                          D->getBeginLoc(), D->getBeginLoc());
+    CXXGlobalInits.push_back(Fn);
+  }
+
+  CurCGF->EmitStmt(D->getStmt());
+}
+
 void CodeGenModule::EmitDeclContext(const DeclContext *DC) {
   for (auto *I : DC->decls()) {
     // Unlike other DeclContexts, the contents of an ObjCImplDecl at TU scope
@@ -6078,7 +6258,7 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
               TSK_ExplicitInstantiationDefinition &&
           Spec->hasDefinition())
         DI->completeTemplateDefinition(*Spec);
-  } LLVM_FALLTHROUGH;
+  } [[fallthrough]];
   case Decl::CXXRecord: {
     CXXRecordDecl *CRD = cast<CXXRecordDecl>(D);
     if (CGDebugInfo *DI = getModuleDebugInfo()) {
@@ -6220,6 +6400,10 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
     break;
   }
 
+  case Decl::TopLevelStmt:
+    EmitTopLevelStmt(cast<TopLevelStmtDecl>(D));
+    break;
+
   case Decl::Import: {
     auto *Import = cast<ImportDecl>(D);
 
@@ -6232,6 +6416,16 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
       if (CGDebugInfo *DI = getModuleDebugInfo())
         DI->EmitImportDecl(*Import);
     }
+
+    // For C++ standard modules we are done - we will call the module
+    // initializer for imported modules, and that will likewise call those for
+    // any imports it has.
+    if (CXX20ModuleInits && Import->getImportedOwningModule() &&
+        !Import->getImportedOwningModule()->isModuleMapModule())
+      break;
+
+    // For clang C++ module map modules the initializers for sub-modules are
+    // emitted here.
 
     // Find all of the submodules and emit the module initializers.
     llvm::SmallPtrSet<clang::Module *, 16> Visited;
@@ -6304,6 +6498,10 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
     if (CGDebugInfo *DI = getModuleDebugInfo())
       if (cast<EnumDecl>(D)->getDefinition())
         DI->EmitAndRetainType(getContext().getEnumType(cast<EnumDecl>(D)));
+    break;
+
+  case Decl::HLSLBuffer:
+    getHLSLRuntime().addBuffer(cast<HLSLBufferDecl>(D));
     break;
 
   default:
@@ -6916,4 +7114,34 @@ void CodeGenModule::printPostfixForExternalizedDecl(llvm::raw_ostream &OS,
   } else {
     OS << getContext().getCUIDHash();
   }
+}
+
+void CodeGenModule::moveLazyEmissionStates(CodeGenModule *NewBuilder) {
+  assert(DeferredDeclsToEmit.empty() &&
+         "Should have emitted all decls deferred to emit.");
+  assert(NewBuilder->DeferredDecls.empty() &&
+         "Newly created module should not have deferred decls");
+  NewBuilder->DeferredDecls = std::move(DeferredDecls);
+
+  assert(NewBuilder->DeferredVTables.empty() &&
+         "Newly created module should not have deferred vtables");
+  NewBuilder->DeferredVTables = std::move(DeferredVTables);
+
+  assert(NewBuilder->MangledDeclNames.empty() &&
+         "Newly created module should not have mangled decl names");
+  assert(NewBuilder->Manglings.empty() &&
+         "Newly created module should not have manglings");
+  NewBuilder->Manglings = std::move(Manglings);
+
+  assert(WeakRefReferences.empty() && "Not all WeakRefRefs have been applied");
+  NewBuilder->WeakRefReferences = std::move(WeakRefReferences);
+
+  NewBuilder->TBAA = std::move(TBAA);
+
+  assert(NewBuilder->EmittedDeferredDecls.empty() &&
+         "Still have (unmerged) EmittedDeferredDecls deferred decls");
+
+  NewBuilder->EmittedDeferredDecls = std::move(EmittedDeferredDecls);
+
+  NewBuilder->ABI->MangleCtx = std::move(ABI->MangleCtx);
 }

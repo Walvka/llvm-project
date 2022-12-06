@@ -38,6 +38,7 @@
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/ProfDataUtils.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
@@ -248,16 +249,16 @@ void llvm::addStringMetadataToLoop(Loop *TheLoop, const char *StringMD,
 
 Optional<ElementCount>
 llvm::getOptionalElementCountLoopAttribute(const Loop *TheLoop) {
-  Optional<int> Width =
+  std::optional<int> Width =
       getOptionalIntLoopAttribute(TheLoop, "llvm.loop.vectorize.width");
 
   if (Width) {
-    Optional<int> IsScalable = getOptionalIntLoopAttribute(
+    std::optional<int> IsScalable = getOptionalIntLoopAttribute(
         TheLoop, "llvm.loop.vectorize.scalable.enable");
     return ElementCount::get(*Width, IsScalable.value_or(false));
   }
 
-  return None;
+  return std::nullopt;
 }
 
 Optional<MDNode *> llvm::makeFollowupLoopID(
@@ -266,7 +267,7 @@ Optional<MDNode *> llvm::makeFollowupLoopID(
   if (!OrigLoopID) {
     if (AlwaysNew)
       return nullptr;
-    return None;
+    return std::nullopt;
   }
 
   assert(OrigLoopID->getOperand(0) == OrigLoopID);
@@ -325,7 +326,7 @@ Optional<MDNode *> llvm::makeFollowupLoopID(
   // Attributes of the followup loop not specified explicity, so signal to the
   // transformation pass to add suitable attributes.
   if (!AlwaysNew && !HasAnyFollowup)
-    return None;
+    return std::nullopt;
 
   // If no attributes were added or remove, the previous loop Id can be reused.
   if (!AlwaysNew && !Changed)
@@ -353,7 +354,7 @@ TransformationMode llvm::hasUnrollTransformation(const Loop *L) {
   if (getBooleanLoopAttribute(L, "llvm.loop.unroll.disable"))
     return TM_SuppressedByUser;
 
-  Optional<int> Count =
+  std::optional<int> Count =
       getOptionalIntLoopAttribute(L, "llvm.loop.unroll.count");
   if (Count)
     return Count.value() == 1 ? TM_SuppressedByUser : TM_ForcedByUser;
@@ -374,7 +375,7 @@ TransformationMode llvm::hasUnrollAndJamTransformation(const Loop *L) {
   if (getBooleanLoopAttribute(L, "llvm.loop.unroll_and_jam.disable"))
     return TM_SuppressedByUser;
 
-  Optional<int> Count =
+  std::optional<int> Count =
       getOptionalIntLoopAttribute(L, "llvm.loop.unroll_and_jam.count");
   if (Count)
     return Count.value() == 1 ? TM_SuppressedByUser : TM_ForcedByUser;
@@ -397,7 +398,7 @@ TransformationMode llvm::hasVectorizeTransformation(const Loop *L) {
 
   Optional<ElementCount> VectorizeWidth =
       getOptionalElementCountLoopAttribute(L);
-  Optional<int> InterleaveCount =
+  std::optional<int> InterleaveCount =
       getOptionalIntLoopAttribute(L, "llvm.loop.interleave.count");
 
   // 'Forcing' vector width and interleave count to one effectively disables
@@ -485,8 +486,10 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
   // Tell ScalarEvolution that the loop is deleted. Do this before
   // deleting the loop so that ScalarEvolution can look at the loop
   // to determine what it needs to clean up.
-  if (SE)
+  if (SE) {
     SE->forgetLoop(L);
+    SE->forgetBlockAndLoopDispositions();
+  }
 
   Instruction *OldTerm = Preheader->getTerminator();
   assert(!OldTerm->mayHaveSideEffects() &&
@@ -591,7 +594,7 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
   }
 
   // Use a map to unique and a vector to guarantee deterministic ordering.
-  llvm::SmallDenseSet<std::pair<DIVariable *, DIExpression *>, 4> DeadDebugSet;
+  llvm::SmallDenseSet<DebugVariable, 4> DeadDebugSet;
   llvm::SmallVector<DbgVariableIntrinsic *, 4> DeadDebugInst;
 
   if (ExitBlock) {
@@ -602,10 +605,10 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
     // loop will be already eliminated and we have less work to do but according
     // to API doc of User::dropAllReferences only valid operation after dropping
     // references, is deletion. So let's substitute all usages of
-    // instruction from the loop with undef value of corresponding type first.
+    // instruction from the loop with poison value of corresponding type first.
     for (auto *Block : L->blocks())
       for (Instruction &I : *Block) {
-        auto *Undef = UndefValue::get(I.getType());
+        auto *Poison = PoisonValue::get(I.getType());
         for (Use &U : llvm::make_early_inc_range(I.uses())) {
           if (auto *Usr = dyn_cast<Instruction>(U.getUser()))
             if (L->contains(Usr->getParent()))
@@ -615,16 +618,13 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
           if (DT)
             assert(!DT->isReachableFromEntry(U) &&
                    "Unexpected user in reachable block");
-          U.set(Undef);
+          U.set(Poison);
         }
         auto *DVI = dyn_cast<DbgVariableIntrinsic>(&I);
         if (!DVI)
           continue;
-        auto Key =
-            DeadDebugSet.find({DVI->getVariable(), DVI->getExpression()});
-        if (Key != DeadDebugSet.end())
+        if (!DeadDebugSet.insert(DebugVariable(DVI)).second)
           continue;
-        DeadDebugSet.insert({DVI->getVariable(), DVI->getExpression()});
         DeadDebugInst.push_back(DVI);
       }
 
@@ -633,15 +633,14 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
     // Since debug values in the loop have been deleted, inserting an undef
     // dbg.value truncates the range of any dbg.value before the loop where the
     // loop used to be. This is particularly important for constant values.
-    DIBuilder DIB(*ExitBlock->getModule());
     Instruction *InsertDbgValueBefore = ExitBlock->getFirstNonPHI();
     assert(InsertDbgValueBefore &&
            "There should be a non-PHI instruction in exit block, else these "
            "instructions will have no parent.");
-    for (auto *DVI : DeadDebugInst)
-      DIB.insertDbgValueIntrinsic(UndefValue::get(Builder.getInt32Ty()),
-                                  DVI->getVariable(), DVI->getExpression(),
-                                  DVI->getDebugLoc(), InsertDbgValueBefore);
+    for (auto *DVI : DeadDebugInst) {
+      DVI->setUndef();
+      DVI->moveBefore(InsertDbgValueBefore);
+    }
   }
 
   // Remove the block from the reference counting scheme, so that we can
@@ -693,6 +692,7 @@ void llvm::breakLoopBackedge(Loop *L, DominatorTree &DT, ScalarEvolution &SE,
   Loop *OutermostLoop = L->getOutermostLoop();
 
   SE.forgetLoop(L);
+  SE.forgetBlockAndLoopDispositions();
 
   std::unique_ptr<MemorySSAUpdater> MSSAU;
   if (MSSA)
@@ -789,15 +789,15 @@ getEstimatedTripCount(BranchInst *ExitingBranch, Loop *L,
   // know the number of times the backedge was taken, vs. the number of times
   // we exited the loop.
   uint64_t LoopWeight, ExitWeight;
-  if (!ExitingBranch->extractProfMetadata(LoopWeight, ExitWeight))
-    return None;
+  if (!extractBranchWeights(*ExitingBranch, LoopWeight, ExitWeight))
+    return std::nullopt;
 
   if (L->contains(ExitingBranch->getSuccessor(1)))
     std::swap(LoopWeight, ExitWeight);
 
   if (!ExitWeight)
     // Don't have a way to return predicated infinite
-    return None;
+    return std::nullopt;
 
   OrigExitWeight = ExitWeight;
 
@@ -824,7 +824,7 @@ llvm::getLoopEstimatedTripCount(Loop *L,
       return *EstTripCount;
     }
   }
-  return None;
+  return std::nullopt;
 }
 
 bool llvm::setLoopEstimatedTripCount(Loop *L, unsigned EstimatedTripCount,
@@ -1165,7 +1165,7 @@ static bool hasHardUserWithinLoop(const Loop *L, const Instruction *I) {
     if (Curr->mayHaveSideEffects())
       return true;
     // Otherwise, add all its users to worklist.
-    for (auto U : Curr->users()) {
+    for (const auto *U : Curr->users()) {
       auto *UI = cast<Instruction>(U);
       if (Visited.insert(UI).second)
         WorkList.push_back(UI);
@@ -1394,7 +1394,10 @@ int llvm::rewriteLoopExitValues(Loop *L, LoopInfo *LI, TargetLibraryInfo *TLI,
         // and next SCEV may errneously get smaller cost.
 
         // Collect all the candidate PHINodes to be rewritten.
-        RewritePhiSet.emplace_back(PN, i, ExitValue, Inst, HighCost);
+        Instruction *InsertPt =
+          (isa<PHINode>(Inst) || isa<LandingPadInst>(Inst)) ?
+          &*Inst->getParent()->getFirstInsertionPt() : Inst;
+        RewritePhiSet.emplace_back(PN, i, ExitValue, InsertPt, HighCost);
       }
     }
   }
@@ -1664,8 +1667,7 @@ Value *llvm::addRuntimeChecks(
 }
 
 Value *llvm::addDiffRuntimeChecks(
-    Instruction *Loc, Loop *TheLoop, ArrayRef<PointerDiffInfo> Checks,
-    SCEVExpander &Expander,
+    Instruction *Loc, ArrayRef<PointerDiffInfo> Checks, SCEVExpander &Expander,
     function_ref<Value *(IRBuilderBase &, unsigned)> GetVF, unsigned IC) {
 
   LLVMContext &Ctx = Loc->getContext();
@@ -1675,7 +1677,7 @@ Value *llvm::addDiffRuntimeChecks(
   // Our instructions might fold to a constant.
   Value *MemoryRuntimeCheck = nullptr;
 
-  for (auto &C : Checks) {
+  for (const auto &C : Checks) {
     Type *Ty = C.SinkStart->getType();
     // Compute VF * IC * AccessSize.
     auto *VFTimesUFTimesSize =
@@ -1702,9 +1704,9 @@ Value *llvm::addDiffRuntimeChecks(
   return MemoryRuntimeCheck;
 }
 
-Optional<IVConditionInfo> llvm::hasPartialIVCondition(Loop &L,
+Optional<IVConditionInfo> llvm::hasPartialIVCondition(const Loop &L,
                                                       unsigned MSSAThreshold,
-                                                      MemorySSA &MSSA,
+                                                      const MemorySSA &MSSA,
                                                       AAResults &AA) {
   auto *TI = dyn_cast<BranchInst>(L.getHeader()->getTerminator());
   if (!TI || !TI->isConditional())
@@ -1840,7 +1842,7 @@ Optional<IVConditionInfo> llvm::hasPartialIVCondition(Loop &L,
           if (L.contains(Succ))
             continue;
 
-          Info.PathIsNoop &= llvm::empty(Succ->phis()) &&
+          Info.PathIsNoop &= Succ->phis().empty() &&
                              (!Info.ExitForPath || Info.ExitForPath == Succ);
           if (!Info.PathIsNoop)
             break;

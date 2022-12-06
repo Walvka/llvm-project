@@ -24,6 +24,7 @@
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/IndirectCallPromotionAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/MemoryProfileInfo.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/Analysis/StackSafetyAnalysis.h"
 #include "llvm/Analysis/TypeMetadataUtils.h"
@@ -56,14 +57,18 @@
 #include <vector>
 
 using namespace llvm;
+using namespace llvm::memprof;
 
 #define DEBUG_TYPE "module-summary-analysis"
 
 // Option to force edges cold which will block importing when the
 // -import-cold-multiplier is set to 0. Useful for debugging.
+namespace llvm {
 FunctionSummary::ForceSummaryHotnessType ForceSummaryEdgesCold =
     FunctionSummary::FSHT_None;
-cl::opt<FunctionSummary::ForceSummaryHotnessType, true> FSEC(
+} // namespace llvm
+
+static cl::opt<FunctionSummary::ForceSummaryHotnessType, true> FSEC(
     "force-summary-edges-cold", cl::Hidden, cl::location(ForceSummaryEdgesCold),
     cl::desc("Force all edges in the function summary to cold"),
     cl::values(clEnumValN(FunctionSummary::FSHT_None, "none", "None."),
@@ -71,10 +76,9 @@ cl::opt<FunctionSummary::ForceSummaryHotnessType, true> FSEC(
                           "all-non-critical", "All non-critical edges."),
                clEnumValN(FunctionSummary::FSHT_All, "all", "All edges.")));
 
-cl::opt<std::string> ModuleSummaryDotFile(
-    "module-summary-dot-file", cl::init(""), cl::Hidden,
-    cl::value_desc("filename"),
-    cl::desc("File to emit dot graph of new summary into."));
+static cl::opt<std::string> ModuleSummaryDotFile(
+    "module-summary-dot-file", cl::Hidden, cl::value_desc("filename"),
+    cl::desc("File to emit dot graph of new summary into"));
 
 // Walk through the operands of a given User via worklist iteration and populate
 // the set of GlobalValue references encountered. Invoked either on an
@@ -164,7 +168,8 @@ static void addIntrinsicToSummary(
     SetVector<FunctionSummary::ConstVCall> &TypeCheckedLoadConstVCalls,
     DominatorTree &DT) {
   switch (CI->getCalledFunction()->getIntrinsicID()) {
-  case Intrinsic::type_test: {
+  case Intrinsic::type_test:
+  case Intrinsic::public_type_test: {
     auto *TypeMDVal = cast<MetadataAsValue>(CI->getArgOperand(1));
     auto *TypeId = dyn_cast<MDString>(TypeMDVal->getMetadata());
     if (!TypeId)
@@ -273,6 +278,9 @@ static void computeFunctionSummary(
   findRefEdges(Index, &F, RefEdges, Visited);
   std::vector<const Instruction *> NonVolatileLoads;
   std::vector<const Instruction *> NonVolatileStores;
+
+  std::vector<CallsiteInfo> Callsites;
+  std::vector<AllocInfo> Allocs;
 
   bool HasInlineAsmMaybeReferencingInternal = false;
   bool HasIndirBranchToBlockAddress = false;
@@ -416,6 +424,57 @@ static void computeFunctionSummary(
           CallGraphEdges[Index.getOrInsertValueInfo(Candidate.Value)]
               .updateHotness(getHotness(Candidate.Count, PSI));
       }
+
+      // TODO: Skip indirect calls for now. Need to handle these better, likely
+      // by creating multiple Callsites, one per target, then speculatively
+      // devirtualize while applying clone info in the ThinLTO backends. This
+      // will also be important because we will have a different set of clone
+      // versions per target. This handling needs to match that in the ThinLTO
+      // backend so we handle things consistently for matching of callsite
+      // summaries to instructions.
+      if (!CalledFunction)
+        continue;
+
+      // Compute the list of stack ids first (so we can trim them from the stack
+      // ids on any MIBs).
+      CallStack<MDNode, MDNode::op_iterator> InstCallsite(
+          I.getMetadata(LLVMContext::MD_callsite));
+      auto *MemProfMD = I.getMetadata(LLVMContext::MD_memprof);
+      if (MemProfMD) {
+        std::vector<MIBInfo> MIBs;
+        for (auto &MDOp : MemProfMD->operands()) {
+          auto *MIBMD = cast<const MDNode>(MDOp);
+          MDNode *StackNode = getMIBStackNode(MIBMD);
+          assert(StackNode);
+          SmallVector<unsigned> StackIdIndices;
+          CallStack<MDNode, MDNode::op_iterator> StackContext(StackNode);
+          // Collapse out any on the allocation call (inlining).
+          for (auto ContextIter =
+                   StackContext.beginAfterSharedPrefix(InstCallsite);
+               ContextIter != StackContext.end(); ++ContextIter) {
+            unsigned StackIdIdx = Index.addOrGetStackIdIndex(*ContextIter);
+            // If this is a direct recursion, simply skip the duplicate
+            // entries. If this is mutual recursion, handling is left to
+            // the LTO link analysis client.
+            if (StackIdIndices.empty() || StackIdIndices.back() != StackIdIdx)
+              StackIdIndices.push_back(StackIdIdx);
+          }
+          MIBs.push_back(
+              MIBInfo(getMIBAllocType(MIBMD), std::move(StackIdIndices)));
+        }
+        Allocs.push_back(AllocInfo(std::move(MIBs)));
+      } else if (!InstCallsite.empty()) {
+        SmallVector<unsigned> StackIdIndices;
+        for (auto StackId : InstCallsite)
+          StackIdIndices.push_back(Index.addOrGetStackIdIndex(StackId));
+        // Use the original CalledValue, in case it was an alias. We want
+        // to record the call edge to the alias in that case. Eventually
+        // an alias summary will be created to associate the alias and
+        // aliasee.
+        auto CalleeValueInfo =
+            Index.getOrInsertValueInfo(cast<GlobalValue>(CalledValue));
+        Callsites.push_back({CalleeValueInfo, StackIdIndices});
+      }
     }
   }
   Index.addBlockCount(F.size());
@@ -491,8 +550,7 @@ static void computeFunctionSummary(
       F.getLinkage(), F.getVisibility(), NotEligibleForImport,
       /* Live = */ false, F.isDSOLocal(), F.canBeOmittedFromSymbolTable());
   FunctionSummary::FFlags FunFlags{
-      F.hasFnAttribute(Attribute::ReadNone),
-      F.hasFnAttribute(Attribute::ReadOnly),
+      F.doesNotAccessMemory(), F.onlyReadsMemory() && !F.doesNotAccessMemory(),
       F.hasFnAttribute(Attribute::NoRecurse), F.returnDoesNotAlias(),
       // FIXME: refactor this to use the same code that inliner is using.
       // Don't try to import functions with noinline attribute.
@@ -508,7 +566,8 @@ static void computeFunctionSummary(
       CallGraphEdges.takeVector(), TypeTests.takeVector(),
       TypeTestAssumeVCalls.takeVector(), TypeCheckedLoadVCalls.takeVector(),
       TypeTestAssumeConstVCalls.takeVector(),
-      TypeCheckedLoadConstVCalls.takeVector(), std::move(ParamAccesses));
+      TypeCheckedLoadConstVCalls.takeVector(), std::move(ParamAccesses),
+      std::move(Callsites), std::move(Allocs));
   if (NonRenamableLocal)
     CantBePromoted.insert(F.getGUID());
   Index.addGlobalValueSummary(F, std::move(FuncSummary));
@@ -646,15 +705,18 @@ static void computeVariableSummary(ModuleSummaryIndex &Index,
   Index.addGlobalValueSummary(V, std::move(GVarSummary));
 }
 
-static void
-computeAliasSummary(ModuleSummaryIndex &Index, const GlobalAlias &A,
-                    DenseSet<GlobalValue::GUID> &CantBePromoted) {
+static void computeAliasSummary(ModuleSummaryIndex &Index, const GlobalAlias &A,
+                                DenseSet<GlobalValue::GUID> &CantBePromoted) {
+  // Skip summary for indirect function aliases as summary for aliasee will not
+  // be emitted.
+  const GlobalObject *Aliasee = A.getAliaseeObject();
+  if (isa<GlobalIFunc>(Aliasee))
+    return;
   bool NonRenamableLocal = isNonRenamableLocal(A);
   GlobalValueSummary::GVFlags Flags(
       A.getLinkage(), A.getVisibility(), NonRenamableLocal,
       /* Live = */ false, A.isDSOLocal(), A.canBeOmittedFromSymbolTable());
   auto AS = std::make_unique<AliasSummary>(Flags);
-  auto *Aliasee = A.getAliaseeObject();
   auto AliaseeVI = Index.getValueInfo(Aliasee->getGUID());
   assert(AliaseeVI && "Alias expects aliasee summary to be available");
   assert(AliaseeVI.getSummaryList().size() == 1 &&
@@ -754,7 +816,8 @@ ModuleSummaryIndex llvm::buildModuleSummaryIndex(
                     ArrayRef<FunctionSummary::VFuncId>{},
                     ArrayRef<FunctionSummary::ConstVCall>{},
                     ArrayRef<FunctionSummary::ConstVCall>{},
-                    ArrayRef<FunctionSummary::ParamAccess>{});
+                    ArrayRef<FunctionSummary::ParamAccess>{},
+                    ArrayRef<CallsiteInfo>{}, ArrayRef<AllocInfo>{});
             Index.addGlobalValueSummary(*GV, std::move(Summary));
           } else {
             std::unique_ptr<GlobalVarSummary> Summary =
@@ -810,6 +873,13 @@ ModuleSummaryIndex llvm::buildModuleSummaryIndex(
   // index.
   for (const GlobalAlias &A : M.aliases())
     computeAliasSummary(Index, A, CantBePromoted);
+
+  // Iterate through ifuncs, set their resolvers all alive.
+  for (const GlobalIFunc &I : M.ifuncs()) {
+    I.applyAlongResolverPath([&Index](const GlobalValue &GV) {
+      Index.getGlobalValueSummary(GV)->setLive(true);
+    });
+  }
 
   for (auto *V : LocalsUsed) {
     auto *Summary = Index.getGlobalValueSummary(*V);

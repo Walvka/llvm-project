@@ -68,6 +68,7 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include <cassert>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -140,9 +141,7 @@ static bool isLeakCheckerRoot(GlobalVariable *GV) {
       case Type::StructTyID: {
         StructType *STy = cast<StructType>(Ty);
         if (STy->isOpaque()) return true;
-        for (StructType::element_iterator I = STy->element_begin(),
-                 E = STy->element_end(); I != E; ++I) {
-          Type *InnerTy = *I;
+        for (Type *InnerTy : STy->elements()) {
           if (isa<PointerType>(InnerTy)) return true;
           if (isa<StructType>(InnerTy) || isa<ArrayType>(InnerTy) ||
               isa<VectorType>(InnerTy))
@@ -377,6 +376,11 @@ static bool collectSRATypes(DenseMap<uint64_t, Type *> &Types, GlobalValue *GV,
       auto It = Types.try_emplace(Offset.getZExtValue(), Ty).first;
       if (Ty != It->second)
         return false;
+
+      // Scalable types not currently supported.
+      if (isa<ScalableVectorType>(Ty))
+        return false;
+
       continue;
     }
 
@@ -470,8 +474,7 @@ static GlobalVariable *SRAGlobal(GlobalVariable *GV, const DataLayout &DL) {
   // Sort by offset.
   SmallVector<std::pair<uint64_t, Type *>, 16> TypesVector;
   append_range(TypesVector, Types);
-  sort(TypesVector,
-       [](const auto &A, const auto &B) { return A.first < B.first; });
+  sort(TypesVector, llvm::less_first());
 
   // Check that the types are non-overlapping.
   uint64_t Offset = 0;
@@ -653,7 +656,7 @@ static bool allUsesOfLoadedValueWillTrapIfNull(const GlobalVariable *GV) {
   Worklist.push_back(GV);
   while (!Worklist.empty()) {
     const Value *P = Worklist.pop_back_val();
-    for (auto *U : P->users()) {
+    for (const auto *U : P->users()) {
       if (auto *LI = dyn_cast<LoadInst>(U)) {
         SmallPtrSet<const PHINode *, 8> PHIs;
         if (!AllUsesOfValueWillTrapIfNull(LI, PHIs))
@@ -880,7 +883,7 @@ OptimizeGlobalAddressOfAllocation(GlobalVariable *GV, CallInst *CI,
   if (!isa<UndefValue>(InitVal)) {
     IRBuilder<> Builder(CI->getNextNode());
     // TODO: Use alignment above if align!=1
-    Builder.CreateMemSet(NewGV, InitVal, AllocSize, None);
+    Builder.CreateMemSet(NewGV, InitVal, AllocSize, std::nullopt);
   }
 
   // Update users of the allocation to use the new global instead.
@@ -1040,7 +1043,7 @@ static bool tryToOptimizeStoreOfAllocationToGlobal(GlobalVariable *GV,
                                                    CallInst *CI,
                                                    const DataLayout &DL,
                                                    TargetLibraryInfo *TLI) {
-  if (!isAllocRemovable(CI, TLI))
+  if (!isRemovableAlloc(CI, TLI))
     // Must be able to remove the call when we get done..
     return false;
 
@@ -1819,11 +1822,14 @@ hasOnlyColdCalls(Function &F,
         Function *CalledFn = CI->getCalledFunction();
         if (!CalledFn)
           return false;
-        if (!CalledFn->hasLocalLinkage())
-          return false;
         // Skip over intrinsics since they won't remain as function calls.
+        // Important to do this check before the linkage check below so we
+        // won't bail out on debug intrinsics, possibly making the generated
+        // code dependent on the presence of debug info.
         if (CalledFn->getIntrinsicID() != Intrinsic::not_intrinsic)
           continue;
+        if (!CalledFn->hasLocalLinkage())
+          return false;
         // Check if it's valid to use coldcc calling convention.
         if (!hasChangeableCC(CalledFn) || CalledFn->isVarArg() ||
             CalledFn->hasAddressTaken())
@@ -2004,7 +2010,7 @@ OptimizeFunctions(Module &M,
     // FIXME: We should also hoist alloca affected by this to the entry
     // block if possible.
     if (F.getAttributes().hasAttrSomewhere(Attribute::InAlloca) &&
-        !F.hasAddressTaken() && !hasMustTailCallers(&F)) {
+        !F.hasAddressTaken() && !hasMustTailCallers(&F) && !F.isVarArg()) {
       RemoveAttribute(&F, Attribute::InAlloca);
       Changed = true;
     }
@@ -2400,7 +2406,7 @@ static bool cxxDtorIsEmpty(const Function &Fn) {
   if (Fn.isDeclaration())
     return false;
 
-  for (auto &I : Fn.getEntryBlock()) {
+  for (const auto &I : Fn.getEntryBlock()) {
     if (I.isDebugOrPseudoInst())
       continue;
     if (isa<ReturnInst>(I))
@@ -2463,7 +2469,7 @@ optimizeGlobalsInModule(Module &M, const DataLayout &DL,
   SmallPtrSet<const Comdat *, 8> NotDiscardableComdats;
   bool Changed = false;
   bool LocalChange = true;
-  Optional<uint32_t> FirstNotFullyEvaluatedPriority;
+  std::optional<uint32_t> FirstNotFullyEvaluatedPriority;
 
   while (LocalChange) {
     LocalChange = false;

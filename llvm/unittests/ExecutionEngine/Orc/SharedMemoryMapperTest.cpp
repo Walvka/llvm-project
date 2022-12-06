@@ -18,7 +18,7 @@ using namespace llvm::orc;
 using namespace llvm::orc::shared;
 using namespace llvm::orc::rt_bootstrap;
 
-#if defined(LLVM_ON_UNIX) || defined(_WIN32)
+#if (defined(LLVM_ON_UNIX) && !defined(__ANDROID__)) || defined(_WIN32)
 
 // A basic function to be used as both initializer/deinitializer
 orc::shared::CWrapperFunctionResult incrementWrapper(const char *ArgData,
@@ -62,11 +62,11 @@ TEST(SharedMemoryMapperTest, MemReserveInitializeDeinitializeRelease) {
   auto F = P.get_future();
 
   {
-    auto PageSize = cantFail(sys::Process::getPageSize());
-    size_t ReqSize = PageSize;
-
     std::unique_ptr<MemoryMapper> Mapper =
-        std::make_unique<SharedMemoryMapper>(*SelfEPC, SAs);
+        cantFail(SharedMemoryMapper::Create(*SelfEPC, SAs));
+
+    auto PageSize = Mapper->getPageSize();
+    size_t ReqSize = PageSize;
 
     Mapper->reserve(ReqSize, [&](Expected<ExecutorAddrRange> Result) {
       EXPECT_THAT_ERROR(Result.takeError(), Succeeded());
@@ -81,7 +81,7 @@ TEST(SharedMemoryMapperTest, MemReserveInitializeDeinitializeRelease) {
         SI.Offset = 0;
         SI.ContentSize = TestString.size() + 1;
         SI.ZeroFillSize = PageSize - SI.ContentSize;
-        SI.Prot = sys::Memory::MF_READ | sys::Memory::MF_WRITE;
+        SI.AG = MemProt::Read | MemProt::Write;
 
         AI.MappingBase = Reservation.Start;
         AI.Segments.push_back(SI);

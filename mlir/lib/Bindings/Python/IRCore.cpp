@@ -119,6 +119,13 @@ Returns:
   argument.
 )";
 
+static const char kOperationPrintBytecodeDocstring[] =
+    R"(Write the bytecode form of the operation to a file like object.
+
+Args:
+  file: The file like object to write to.
+)";
+
 static const char kOperationStrDunderDocstring[] =
     R"(Gets the assembly form of the operation with default options.
 
@@ -785,8 +792,7 @@ py::tuple PyDiagnostic::getNotes() {
   materializedNotes = py::tuple(numNotes);
   for (intptr_t i = 0; i < numNotes; ++i) {
     MlirDiagnostic noteDiag = mlirDiagnosticGetNote(diagnostic, i);
-    py::object pyNoteDiag = py::cast(PyDiagnostic(noteDiag));
-    PyTuple_SET_ITEM(materializedNotes->ptr(), i, pyNoteDiag.ptr());
+    materializedNotes.value()[i] = PyDiagnostic(noteDiag);
   }
   return *materializedNotes;
 }
@@ -1011,7 +1017,8 @@ void PyOperationBase::print(py::object fileObject, bool binary,
   if (largeElementsLimit)
     mlirOpPrintingFlagsElideLargeElementsAttrs(flags, *largeElementsLimit);
   if (enableDebugInfo)
-    mlirOpPrintingFlagsEnableDebugInfo(flags, /*prettyForm=*/prettyDebugInfo);
+    mlirOpPrintingFlagsEnableDebugInfo(flags, /*enable=*/true,
+                                       /*prettyForm=*/prettyDebugInfo);
   if (printGenericOpForm)
     mlirOpPrintingFlagsPrintGenericOpForm(flags);
   if (useLocalScope)
@@ -1021,6 +1028,14 @@ void PyOperationBase::print(py::object fileObject, bool binary,
   mlirOperationPrintWithFlags(operation, flags, accum.getCallback(),
                               accum.getUserData());
   mlirOpPrintingFlagsDestroy(flags);
+}
+
+void PyOperationBase::writeBytecode(const py::object &fileObject) {
+  PyOperation &operation = getOperation();
+  operation.checkValid();
+  PyFileAccumulator accum(fileObject, /*binary=*/true);
+  mlirOperationWriteBytecode(operation, accum.getCallback(),
+                             accum.getUserData());
 }
 
 py::object PyOperationBase::getAsm(bool binary,
@@ -1286,8 +1301,8 @@ py::object PyOpView::buildGeneric(
   py::object operandSegmentSpecObj = cls.attr("_ODS_OPERAND_SEGMENTS");
   py::object resultSegmentSpecObj = cls.attr("_ODS_RESULT_SEGMENTS");
 
-  std::vector<uint32_t> operandSegmentLengths;
-  std::vector<uint32_t> resultSegmentLengths;
+  std::vector<int32_t> operandSegmentLengths;
+  std::vector<int32_t> resultSegmentLengths;
 
   // Validate/determine region count.
   auto opRegionSpec = py::cast<std::tuple<int, bool>>(cls.attr("_ODS_REGIONS"));
@@ -1498,20 +1513,18 @@ py::object PyOpView::buildGeneric(
 
     // Add result_segment_sizes attribute.
     if (!resultSegmentLengths.empty()) {
-      int64_t size = resultSegmentLengths.size();
-      MlirAttribute segmentLengthAttr = mlirDenseElementsAttrUInt32Get(
-          mlirVectorTypeGet(1, &size, mlirIntegerTypeGet(context->get(), 32)),
-          resultSegmentLengths.size(), resultSegmentLengths.data());
+      MlirAttribute segmentLengthAttr =
+          mlirDenseI32ArrayGet(context->get(), resultSegmentLengths.size(),
+                               resultSegmentLengths.data());
       (*attributes)["result_segment_sizes"] =
           PyAttribute(context, segmentLengthAttr);
     }
 
     // Add operand_segment_sizes attribute.
     if (!operandSegmentLengths.empty()) {
-      int64_t size = operandSegmentLengths.size();
-      MlirAttribute segmentLengthAttr = mlirDenseElementsAttrUInt32Get(
-          mlirVectorTypeGet(1, &size, mlirIntegerTypeGet(context->get(), 32)),
-          operandSegmentLengths.size(), operandSegmentLengths.data());
+      MlirAttribute segmentLengthAttr =
+          mlirDenseI32ArrayGet(context->get(), operandSegmentLengths.size(),
+                               operandSegmentLengths.data());
       (*attributes)["operand_segment_sizes"] =
           PyAttribute(context, segmentLengthAttr);
     }
@@ -1968,8 +1981,8 @@ template <typename Container>
 static std::vector<PyType> getValueTypes(Container &container,
                                          PyMlirContextRef &context) {
   std::vector<PyType> result;
-  result.reserve(container.getNumElements());
-  for (int i = 0, e = container.getNumElements(); i < e; ++i) {
+  result.reserve(container.size());
+  for (int i = 0, e = container.size(); i < e; ++i) {
     result.push_back(
         PyType(context, mlirValueGetType(container.getElement(i).get())));
   }
@@ -1993,14 +2006,24 @@ public:
                   step),
         operation(std::move(operation)), block(block) {}
 
+  static void bindDerived(ClassTy &c) {
+    c.def_property_readonly("types", [](PyBlockArgumentList &self) {
+      return getValueTypes(self, self.operation->getContext());
+    });
+  }
+
+private:
+  /// Give the parent CRTP class access to hook implementations below.
+  friend class Sliceable<PyBlockArgumentList, PyBlockArgument>;
+
   /// Returns the number of arguments in the list.
-  intptr_t getNumElements() {
+  intptr_t getRawNumElements() {
     operation->checkValid();
     return mlirBlockGetNumArguments(block);
   }
 
-  /// Returns `pos`-the element in the list. Asserts on out-of-bounds.
-  PyBlockArgument getElement(intptr_t pos) {
+  /// Returns `pos`-the element in the list.
+  PyBlockArgument getRawElement(intptr_t pos) {
     MlirValue argument = mlirBlockGetArgument(block, pos);
     return PyBlockArgument(operation, argument);
   }
@@ -2011,13 +2034,6 @@ public:
     return PyBlockArgumentList(operation, block, startIndex, length, step);
   }
 
-  static void bindDerived(ClassTy &c) {
-    c.def_property_readonly("types", [](PyBlockArgumentList &self) {
-      return getValueTypes(self, self.operation->getContext());
-    });
-  }
-
-private:
   PyOperationRef operation;
   MlirBlock block;
 };
@@ -2038,12 +2054,25 @@ public:
                   step),
         operation(operation) {}
 
-  intptr_t getNumElements() {
+  void dunderSetItem(intptr_t index, PyValue value) {
+    index = wrapIndex(index);
+    mlirOperationSetOperand(operation->get(), index, value.get());
+  }
+
+  static void bindDerived(ClassTy &c) {
+    c.def("__setitem__", &PyOpOperandList::dunderSetItem);
+  }
+
+private:
+  /// Give the parent CRTP class access to hook implementations below.
+  friend class Sliceable<PyOpOperandList, PyValue>;
+
+  intptr_t getRawNumElements() {
     operation->checkValid();
     return mlirOperationGetNumOperands(operation->get());
   }
 
-  PyValue getElement(intptr_t pos) {
+  PyValue getRawElement(intptr_t pos) {
     MlirValue operand = mlirOperationGetOperand(operation->get(), pos);
     MlirOperation owner;
     if (mlirValueIsAOpResult(operand))
@@ -2061,16 +2090,6 @@ public:
     return PyOpOperandList(operation, startIndex, length, step);
   }
 
-  void dunderSetItem(intptr_t index, PyValue value) {
-    index = wrapIndex(index);
-    mlirOperationSetOperand(operation->get(), index, value.get());
-  }
-
-  static void bindDerived(ClassTy &c) {
-    c.def("__setitem__", &PyOpOperandList::dunderSetItem);
-  }
-
-private:
   PyOperationRef operation;
 };
 
@@ -2090,12 +2109,22 @@ public:
                   step),
         operation(operation) {}
 
-  intptr_t getNumElements() {
+  static void bindDerived(ClassTy &c) {
+    c.def_property_readonly("types", [](PyOpResultList &self) {
+      return getValueTypes(self, self.operation->getContext());
+    });
+  }
+
+private:
+  /// Give the parent CRTP class access to hook implementations below.
+  friend class Sliceable<PyOpResultList, PyOpResult>;
+
+  intptr_t getRawNumElements() {
     operation->checkValid();
     return mlirOperationGetNumResults(operation->get());
   }
 
-  PyOpResult getElement(intptr_t index) {
+  PyOpResult getRawElement(intptr_t index) {
     PyValue value(operation, mlirOperationGetResult(operation->get(), index));
     return PyOpResult(value);
   }
@@ -2104,13 +2133,6 @@ public:
     return PyOpResultList(operation, startIndex, length, step);
   }
 
-  static void bindDerived(ClassTy &c) {
-    c.def_property_readonly("types", [](PyOpResultList &self) {
-      return getValueTypes(self, self.operation->getContext());
-    });
-  }
-
-private:
   PyOperationRef operation;
 };
 
@@ -2604,7 +2626,7 @@ void mlir::python::populateIRCore(py::module &m) {
           "__str__",
           [](PyOperationBase &self) {
             return self.getAsm(/*binary=*/false,
-                               /*largeElementsLimit=*/llvm::None,
+                               /*largeElementsLimit=*/std::nullopt,
                                /*enableDebugInfo=*/false,
                                /*prettyDebugInfo=*/false,
                                /*printGenericOpForm=*/false,
@@ -2621,6 +2643,8 @@ void mlir::python::populateIRCore(py::module &m) {
            py::arg("print_generic_op_form") = false,
            py::arg("use_local_scope") = false,
            py::arg("assume_verified") = false, kOperationPrintDocstring)
+      .def("write_bytecode", &PyOperationBase::writeBytecode, py::arg("file"),
+           kOperationPrintBytecodeDocstring)
       .def("get_asm", &PyOperationBase::getAsm,
            // Careful: Lots of arguments must match up with get_asm method.
            py::arg("binary") = false,
@@ -3109,12 +3133,24 @@ void mlir::python::populateIRCore(py::module &m) {
           kDumpDocstring)
       .def_property_readonly(
           "owner",
-          [](PyValue &self) {
-            assert(mlirOperationEqual(self.getParentOperation()->get(),
-                                      mlirOpResultGetOwner(self.get())) &&
-                   "expected the owner of the value in Python to match that in "
-                   "the IR");
-            return self.getParentOperation().getObject();
+          [](PyValue &self) -> py::object {
+            MlirValue v = self.get();
+            if (mlirValueIsAOpResult(v)) {
+              assert(
+                  mlirOperationEqual(self.getParentOperation()->get(),
+                                     mlirOpResultGetOwner(self.get())) &&
+                  "expected the owner of the value in Python to match that in "
+                  "the IR");
+              return self.getParentOperation().getObject();
+            }
+
+            if (mlirValueIsABlockArgument(v)) {
+              MlirBlock block = mlirBlockArgumentGetOwner(self.get());
+              return py::cast(PyBlock(self.getParentOperation(), block));
+            }
+
+            assert(false && "Value must be a block argument or an op result");
+            return py::none();
           })
       .def("__eq__",
            [](PyValue &self, PyValue &other) {

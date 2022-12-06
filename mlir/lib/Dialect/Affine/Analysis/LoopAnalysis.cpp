@@ -23,6 +23,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
+#include <numeric>
 #include <type_traits>
 
 using namespace mlir;
@@ -86,7 +87,7 @@ Optional<uint64_t> mlir::getConstantTripCount(AffineForOp forOp) {
   getTripCountMapAndOperands(forOp, &map, &operands);
 
   if (!map)
-    return None;
+    return std::nullopt;
 
   // Take the min if all trip counts are constant.
   Optional<uint64_t> tripCount;
@@ -98,7 +99,7 @@ Optional<uint64_t> mlir::getConstantTripCount(AffineForOp forOp) {
       else
         tripCount = constExpr.getValue();
     } else
-      return None;
+      return std::nullopt;
   }
   return tripCount;
 }
@@ -133,7 +134,7 @@ uint64_t mlir::getLargestDivisorOfTripCount(AffineForOp forOp) {
       thisGcd = resultExpr.getLargestKnownDivisor();
     }
     if (gcd.has_value())
-      gcd = llvm::GreatestCommonDivisor64(gcd.value(), thisGcd);
+      gcd = std::gcd(gcd.value(), thisGcd);
     else
       gcd = thisGcd;
   }

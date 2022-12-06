@@ -112,7 +112,6 @@
 ; CHECK-O-NEXT: Running pass: CalledValuePropagationPass
 ; CHECK-O-NEXT: Running pass: GlobalOptPass
 ; CHECK-O-NEXT: Running pass: PromotePass
-; CHECK-O-NEXT: Running pass: DeadArgumentEliminationPass
 ; CHECK-O-NEXT: Running pass: InstCombinePass
 ; CHECK-O-NEXT: Running analysis: OptimizationRemarkEmitterAnalysis
 ; CHECK-O-NEXT: Running analysis: AAManager
@@ -174,6 +173,7 @@
 ; CHECK-O-NEXT: Running pass: LoopRotatePass
 ; CHECK-O-NEXT: Running pass: LICM
 ; CHECK-O-NEXT: Running pass: SimpleLoopUnswitchPass
+; CHECK-O-NEXT: Running analysis: OuterAnalysisManagerProxy
 ; CHECK-O-NEXT: Running pass: SimplifyCFGPass
 ; CHECK-O-NEXT: Running pass: InstCombinePass
 ; CHECK-O-NEXT: Running pass: LoopSimplifyPass
@@ -185,7 +185,7 @@
 ; CHECK-O-NEXT: Running pass: LoopFullUnrollPass
 ; CHECK-EP-LOOP-END-NEXT: Running pass: NoOpLoopPass
 ; CHECK-O-NEXT: Running pass: SROAPass on foo
-; CHECK-MATRIX: Running pass: VectorCombinePass
+; CHECK-O23SZ-NEXT: Running pass: VectorCombinePass
 ; CHECK-O23SZ-NEXT: Running pass: MergedLoadStoreMotionPass
 ; CHECK-O23SZ-NEXT: Running pass: GVNPass
 ; CHECK-O23SZ-NEXT: Running analysis: MemoryDependenceAnalysis
@@ -218,6 +218,7 @@
 ; CHECK-O-NEXT: Running pass: InvalidateAnalysisPass<{{.*}}ShouldNotRunFunctionPassesAnalysis
 ; CHECK-O-NEXT: Invalidating analysis: ShouldNotRunFunctionPassesAnalysis
 ; CHECK-O-NEXT: Invalidating analysis: InlineAdvisorAnalysis
+; CHECK-O-NEXT: Running pass: DeadArgumentEliminationPass
 ; CHECK-O-NEXT: Running pass: CoroCleanupPass
 ; CHECK-O-NEXT: Running pass: GlobalOptPass
 ; CHECK-O-NEXT: Running pass: GlobalDCEPass
@@ -238,12 +239,12 @@
 ; CHECK-O-NEXT: Running pass: LoopRotatePass
 ; CHECK-O-NEXT: Running pass: LoopDeletionPass
 ; CHECK-O-NEXT: Running pass: LoopDistributePass
+; CHECK-O-NEXT: Running analysis: LoopAccessAnalysis on foo
 ; CHECK-O-NEXT: Running pass: InjectTLIMappings
 ; CHECK-O-NEXT: Running pass: LoopVectorizePass
 ; CHECK-O-NEXT: Running analysis: BlockFrequencyAnalysis
 ; CHECK-O-NEXT: Running analysis: BranchProbabilityAnalysis
 ; CHECK-O-NEXT: Running pass: LoopLoadEliminationPass
-; CHECK-O-NEXT: Running analysis: LoopAccessAnalysis
 ; CHECK-O-NEXT: Running pass: InstCombinePass
 ; CHECK-O-NEXT: Running pass: SimplifyCFGPass
 ; CHECK-O2-NEXT: Running pass: SLPVectorizerPass
@@ -253,6 +254,7 @@
 ; CHECK-O-NEXT: Running pass: InstCombinePass
 ; CHECK-O-NEXT: Running pass: LoopUnrollPass
 ; CHECK-O-NEXT: Running pass: WarnMissedTransformationsPass
+; CHECK-O-NEXT: Running pass: SROAPass
 ; CHECK-O-NEXT: Running pass: InstCombinePass
 ; CHECK-O-NEXT: Running pass: RequireAnalysisPass<{{.*}}OptimizationRemarkEmitterAnalysis
 ; CHECK-O-NEXT: Running pass: LoopSimplifyPass
@@ -262,6 +264,7 @@
 ; CHECK-O-NEXT: Running pass: LoopSinkPass
 ; CHECK-O-NEXT: Running pass: InstSimplifyPass
 ; CHECK-O-NEXT: Running pass: DivRemPairsPass
+; CHECK-O-NEXT: Running pass: TailCallElimPass
 ; CHECK-O-NEXT: Running pass: SimplifyCFGPass
 ; CHECK-EP-OPTIMIZER-LAST: Running pass: NoOpModulePass
 ; CHECK-HOT-COLD-SPLIT-NEXT: Running pass: HotColdSplittingPass

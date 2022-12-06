@@ -49,15 +49,15 @@ findAttributeInfo(const DWARFDie DIE,
   const DWARFUnit &U = *DIE.getDwarfUnit();
   uint64_t Offset =
       AbbrevDecl->getAttributeOffsetFromIndex(Index, DIE.getOffset(), U);
-  Optional<DWARFFormValue> Value =
+  std::optional<DWARFFormValue> Value =
       AbbrevDecl->getAttributeValueFromOffset(Index, Offset, U);
   if (!Value)
-    return None;
+    return std::nullopt;
   // AttributeSpec
   const DWARFAbbreviationDeclaration::AttributeSpec *AttrVal =
       AbbrevDecl->attributes().begin() + Index;
   uint32_t ValSize = 0;
-  Optional<int64_t> ValSizeOpt = AttrVal->getByteSize(U);
+  std::optional<int64_t> ValSizeOpt = AttrVal->getByteSize(U);
   if (ValSizeOpt) {
     ValSize = static_cast<uint32_t>(*ValSizeOpt);
   } else {
@@ -76,14 +76,14 @@ findAttributeInfo(const DWARFDie DIE,
 Optional<AttrInfo> findAttributeInfo(const DWARFDie DIE,
                                      dwarf::Attribute Attr) {
   if (!DIE.isValid())
-    return None;
+    return std::nullopt;
   const DWARFAbbreviationDeclaration *AbbrevDecl =
       DIE.getAbbreviationDeclarationPtr();
   if (!AbbrevDecl)
-    return None;
-  Optional<uint32_t> Index = AbbrevDecl->findAttributeIndex(Attr);
+    return std::nullopt;
+  std::optional<uint32_t> Index = AbbrevDecl->findAttributeIndex(Attr);
   if (!Index)
-    return None;
+    return std::nullopt;
   return findAttributeInfo(DIE, AbbrevDecl, *Index);
 }
 
@@ -421,7 +421,7 @@ AddressSectionBuffer DebugAddrWriterDwarf5::finalize() {
     // for it.
     if (AMIter == AddressMaps.end()) {
       AMIter = AddressMaps.insert({CUID, AddressForDWOCU()}).first;
-      Optional<uint64_t> BaseOffset = CU->getAddrOffsetSectionBase();
+      std::optional<uint64_t> BaseOffset = CU->getAddrOffsetSectionBase();
       if (!BaseOffset)
         continue;
       // Address base offset is to the first entry.
@@ -1067,7 +1067,7 @@ std::string DebugInfoBinaryPatcher::patchBinary(StringRef BinaryContents) {
 
 void DebugStrOffsetsWriter::initialize(
     const DWARFSection &StrOffsetsSection,
-    const Optional<StrOffsetsContributionDescriptor> Contr) {
+    const std::optional<StrOffsetsContributionDescriptor> Contr) {
   if (!Contr)
     return;
 
@@ -1183,11 +1183,9 @@ void DebugAbbrevWriter::addUnitAbbreviations(DWARFUnit &Unit) {
       // FIXME: if we had a full access to DWARFDebugAbbrev::AbbrDeclSets
       // we wouldn't have to build our own sorted list for the quick lookup.
       if (AbbrevSetOffsets.empty()) {
-        for_each(
-            *Unit.getContext().getDebugAbbrev(),
-            [&](const std::pair<uint64_t, DWARFAbbreviationDeclarationSet> &P) {
-              AbbrevSetOffsets.push_back(P.first);
-            });
+        for (const std::pair<const uint64_t, DWARFAbbreviationDeclarationSet>
+                 &P : *Unit.getContext().getDebugAbbrev())
+          AbbrevSetOffsets.push_back(P.first);
         sort(AbbrevSetOffsets);
       }
       auto It = upper_bound(AbbrevSetOffsets, StartOffset);
@@ -1515,7 +1513,7 @@ static inline void emitDwarfLineTable(
 }
 
 void DwarfLineTable::emitCU(MCStreamer *MCOS, MCDwarfLineTableParams Params,
-                            Optional<MCDwarfLineStr> &LineStr,
+                            std::optional<MCDwarfLineStr> &LineStr,
                             BinaryContext &BC) const {
   if (!RawData.empty()) {
     assert(MCLineSections.getMCLineEntries().empty() &&
@@ -1587,13 +1585,13 @@ void DwarfLineTable::emit(BinaryContext &BC, MCStreamer &Streamer) {
   if (LineTables.empty())
     return;
   // In a v5 non-split line table, put the strings in a separate section.
-  Optional<MCDwarfLineStr> LineStr(None);
+  std::optional<MCDwarfLineStr> LineStr;
   ErrorOr<BinarySection &> LineStrSection =
       BC.getUniqueSectionByName(".debug_line_str");
   // Some versions of GCC output DWARF5 .debug_info, but DWARF4 or lower
   // .debug_line
   if (LineStrSection) {
-    LineStr = MCDwarfLineStr(*BC.Ctx);
+    LineStr.emplace(*BC.Ctx);
     parseAndPopulateDebugLineStr(*LineStrSection, *LineStr, BC, Streamer);
   }
 

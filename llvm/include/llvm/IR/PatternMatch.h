@@ -153,10 +153,16 @@ inline class_match<ConstantFP> m_ConstantFP() {
   return class_match<ConstantFP>();
 }
 
-/// Match an arbitrary ConstantExpr and ignore it.
-inline class_match<ConstantExpr> m_ConstantExpr() {
-  return class_match<ConstantExpr>();
-}
+struct constantexpr_match {
+  template <typename ITy> bool match(ITy *V) {
+    auto *C = dyn_cast<Constant>(V);
+    return C && (isa<ConstantExpr>(C) || C->containsConstantExpression());
+  }
+};
+
+/// Match a constant expression or a constant that contains a constant
+/// expression.
+inline constantexpr_match m_ConstantExpr() { return constantexpr_match(); }
 
 /// Match an arbitrary basic block value and ignore it.
 inline class_match<BasicBlock> m_BasicBlock() {
@@ -741,14 +747,14 @@ inline bind_ty<const BasicBlock> m_BasicBlock(const BasicBlock *&V) {
 
 /// Match an arbitrary immediate Constant and ignore it.
 inline match_combine_and<class_match<Constant>,
-                         match_unless<class_match<ConstantExpr>>>
+                         match_unless<constantexpr_match>>
 m_ImmConstant() {
   return m_CombineAnd(m_Constant(), m_Unless(m_ConstantExpr()));
 }
 
 /// Match an immediate Constant, capturing the value if we match.
 inline match_combine_and<bind_ty<Constant>,
-                         match_unless<class_match<ConstantExpr>>>
+                         match_unless<constantexpr_match>>
 m_ImmConstant(Constant *&C) {
   return m_CombineAnd(m_Constant(C), m_Unless(m_ConstantExpr()));
 }
@@ -2200,6 +2206,11 @@ inline typename m_Intrinsic_Ty<Opnd0>::Ty m_Sqrt(const Opnd0 &Op0) {
   return m_Intrinsic<Intrinsic::sqrt>(Op0);
 }
 
+template <typename Opnd0>
+inline typename m_Intrinsic_Ty<Opnd0>::Ty m_VecReverse(const Opnd0 &Op0) {
+  return m_Intrinsic<Intrinsic::experimental_vector_reverse>(Op0);
+}
+
 //===----------------------------------------------------------------------===//
 // Matchers for two-operands operators with the operators in either order
 //
@@ -2507,6 +2518,12 @@ struct LogicalOp_match {
       auto *Cond = Select->getCondition();
       auto *TVal = Select->getTrueValue();
       auto *FVal = Select->getFalseValue();
+
+      // Don't match a scalar select of bool vectors.
+      // Transforms expect a single type for operands if this matches.
+      if (Cond->getType() != Select->getType())
+        return false;
+
       if (Opcode == Instruction::And) {
         auto *C = dyn_cast<Constant>(FVal);
         if (C && C->isNullValue())

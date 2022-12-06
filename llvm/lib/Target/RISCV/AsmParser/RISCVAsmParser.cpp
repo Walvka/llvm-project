@@ -74,6 +74,8 @@ class RISCVAsmParser : public MCTargetAsmParser {
   bool isRV32E() const { return getSTI().hasFeature(RISCV::FeatureRV32E); }
 
   RISCVTargetStreamer &getTargetStreamer() {
+    assert(getParser().getStreamer().getTargetStreamer() &&
+           "do not have a target streamer");
     MCTargetStreamer &TS = *getParser().getStreamer().getTargetStreamer();
     return static_cast<RISCVTargetStreamer &>(TS);
   }
@@ -178,6 +180,7 @@ class RISCVAsmParser : public MCTargetAsmParser {
   bool parseDirectiveOption();
   bool parseDirectiveAttribute();
   bool parseDirectiveInsn(SMLoc L);
+  bool parseDirectiveVariantCC();
 
   void setFeatureBits(uint64_t Feature, StringRef FeatureString) {
     if (!(getSTI().getFeatureBits()[Feature])) {
@@ -2033,6 +2036,8 @@ bool RISCVAsmParser::ParseDirective(AsmToken DirectiveID) {
     return parseDirectiveAttribute();
   if (IDVal == ".insn")
     return parseDirectiveInsn(DirectiveID.getLoc());
+  if (IDVal == ".variant_cc")
+    return parseDirectiveVariantCC();
 
   return true;
 }
@@ -2096,6 +2101,7 @@ bool RISCVAsmParser::parseDirectiveOption() {
                    "unexpected token, expected end of statement");
 
     clearFeatureBits(RISCV::FeatureStdExtC, "c");
+    clearFeatureBits(RISCV::FeatureExtZca, "+experimental-zca");
     return false;
   }
 
@@ -2165,7 +2171,7 @@ bool RISCVAsmParser::parseDirectiveAttribute() {
   TagLoc = Parser.getTok().getLoc();
   if (Parser.getTok().is(AsmToken::Identifier)) {
     StringRef Name = Parser.getTok().getIdentifier();
-    Optional<unsigned> Ret =
+    std::optional<unsigned> Ret =
         ELFAttrs::attrTypeFromString(Name, RISCVAttrs::getRISCVAttributeTags());
     if (!Ret) {
       Error(TagLoc, "attribute name not recognised: " + Name);
@@ -2292,6 +2298,19 @@ bool RISCVAsmParser::parseDirectiveInsn(SMLoc L) {
   return MatchAndEmitInstruction(L, Opcode, Operands, Parser.getStreamer(),
                                  ErrorInfo,
                                  /*MatchingInlineAsm=*/false);
+}
+
+/// parseDirectiveVariantCC
+///  ::= .variant_cc symbol
+bool RISCVAsmParser::parseDirectiveVariantCC() {
+  StringRef Name;
+  if (getParser().parseIdentifier(Name))
+    return TokError("expected symbol name");
+  if (parseEOL())
+    return false;
+  getTargetStreamer().emitDirectiveVariantCC(
+      *getContext().getOrCreateSymbol(Name));
+  return false;
 }
 
 void RISCVAsmParser::emitToStreamer(MCStreamer &S, const MCInst &Inst) {

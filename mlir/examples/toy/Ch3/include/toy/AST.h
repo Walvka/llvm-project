@@ -135,9 +135,9 @@ public:
       : ExprAST(Expr_Return, std::move(loc)), expr(std::move(expr)) {}
 
   llvm::Optional<ExprAST *> getExpr() {
-    if (expr.hasValue())
+    if (expr.has_value())
       return expr->get();
-    return llvm::None;
+    return std::nullopt;
   }
 
   /// LLVM style RTTI

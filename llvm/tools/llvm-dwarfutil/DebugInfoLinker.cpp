@@ -8,11 +8,13 @@
 
 #include "DebugInfoLinker.h"
 #include "Error.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/DWARFLinker/DWARFLinker.h"
 #include "llvm/DWARFLinker/DWARFStreamer.h"
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/DebugInfo/DWARF/DWARFExpression.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Support/Endian.h"
 #include <memory>
 #include <vector>
 
@@ -39,7 +41,7 @@ class ObjFileAddressMap : public AddressesMap {
 public:
   ObjFileAddressMap(DWARFContext &Context, const Options &Options,
                     object::ObjectFile &ObjFile)
-      : Opts(Options) {
+      : Opts(Options), Context(Context) {
     // Remember addresses of existing text sections.
     for (const object::SectionRef &Sect : ObjFile.sections()) {
       if (!Sect.isText())
@@ -48,7 +50,7 @@ public:
       if (Size == 0)
         continue;
       const uint64_t StartAddr = Sect.getAddress();
-      TextAddressRanges[{StartAddr}] = {StartAddr + Size, 0};
+      TextAddressRanges.insert({StartAddr, StartAddr + Size});
     }
 
     // Check CU address ranges for tombstone value.
@@ -59,7 +61,7 @@ public:
         for (auto &Range : *ARanges) {
           if (!isDeadAddressRange(Range.LowPC, Range.HighPC, CU->getVersion(),
                                   Options.Tombstone, CU->getAddressByteSize()))
-            DWARFAddressRanges[{Range.LowPC}] = {Range.HighPC, 0};
+            DWARFAddressRanges.insert({Range.LowPC, Range.HighPC}, 0);
         }
       }
     }
@@ -74,7 +76,7 @@ public:
             DIE.getTag() == dwarf::DW_TAG_label) &&
            "Wrong type of input die");
 
-    if (Optional<uint64_t> LowPC =
+    if (std::optional<uint64_t> LowPC =
             dwarf::toAddress(DIE.find(dwarf::DW_AT_low_pc))) {
       if (!isDeadAddress(*LowPC, DIE.getDwarfUnit()->getVersion(),
                          Opts.Tombstone,
@@ -136,9 +138,28 @@ public:
 
   void clear() override { DWARFAddressRanges.clear(); }
 
-  llvm::Expected<uint64_t> relocateIndexedAddr(uint64_t, uint64_t) override {
-    // should not be called.
-    return object::createError("no relocations in linked binary");
+  llvm::Expected<uint64_t> relocateIndexedAddr(uint64_t StartOffset,
+                                               uint64_t EndOffset) override {
+    // No relocations in linked binary. Return just address value.
+
+    const char *AddrPtr =
+        Context.getDWARFObj().getAddrSection().Data.data() + StartOffset;
+    support::endianness Endianess =
+        Context.getDWARFObj().isLittleEndian() ? support::little : support::big;
+
+    assert(EndOffset > StartOffset);
+    switch (EndOffset - StartOffset) {
+    case 1:
+      return *AddrPtr;
+    case 2:
+      return support::endian::read16(AddrPtr, Endianess);
+    case 4:
+      return support::endian::read32(AddrPtr, Endianess);
+    case 8:
+      return support::endian::read64(AddrPtr, Endianess);
+    }
+
+    llvm_unreachable("relocateIndexedAddr unhandled case!");
   }
 
 protected:
@@ -146,17 +167,13 @@ protected:
   // of executable sections.
   bool isInsideExecutableSectionsAddressRange(uint64_t LowPC,
                                               Optional<uint64_t> HighPC) {
-    auto Range = TextAddressRanges.lower_bound(LowPC);
-    if ((Range == TextAddressRanges.end() || Range->first != LowPC) &&
-        Range != TextAddressRanges.begin())
-      --Range;
+    Optional<AddressRange> Range =
+        TextAddressRanges.getRangeThatContains(LowPC);
 
-    if (Range != TextAddressRanges.end() && Range->first <= LowPC &&
-        (HighPC ? Range->second.HighPC >= HighPC
-                : Range->second.HighPC >= LowPC))
-      return true;
+    if (HighPC)
+      return Range.has_value() && Range->end() >= *HighPC;
 
-    return false;
+    return Range.has_value();
   }
 
   uint64_t isBFDDeadAddressRange(uint64_t LowPC, Optional<uint64_t> HighPC,
@@ -205,17 +222,40 @@ protected:
 
   bool isDeadAddress(uint64_t LowPC, uint16_t Version, TombstoneKind Tombstone,
                      uint8_t AddressByteSize) {
-    return isDeadAddressRange(LowPC, None, Version, Tombstone, AddressByteSize);
+    return isDeadAddressRange(LowPC, std::nullopt, Version, Tombstone,
+                              AddressByteSize);
   }
 
 private:
   RangesTy DWARFAddressRanges;
-  RangesTy TextAddressRanges;
+  AddressRanges TextAddressRanges;
   const Options &Opts;
+  DWARFContext &Context;
 };
 
-bool linkDebugInfo(object::ObjectFile &File, const Options &Options,
-                   raw_pwrite_stream &OutStream) {
+static bool knownByDWARFUtil(StringRef SecName) {
+  return llvm::StringSwitch<bool>(SecName)
+      .Case(".debug_info", true)
+      .Case(".debug_types", true)
+      .Case(".debug_abbrev", true)
+      .Case(".debug_loc", true)
+      .Case(".debug_loclists", true)
+      .Case(".debug_frame", true)
+      .Case(".debug_aranges", true)
+      .Case(".debug_ranges", true)
+      .Case(".debug_rnglists", true)
+      .Case(".debug_line", true)
+      .Case(".debug_line_str", true)
+      .Case(".debug_addr", true)
+      .Case(".debug_macro", true)
+      .Case(".debug_macinfo", true)
+      .Case(".debug_str", true)
+      .Case(".debug_str_offsets", true)
+      .Default(false);
+}
+
+Error linkDebugInfo(object::ObjectFile &File, const Options &Options,
+                    raw_pwrite_stream &OutStream) {
 
   auto ReportWarn = [&](const Twine &Message, StringRef Context,
                         const DWARFDie *Die) {
@@ -239,14 +279,24 @@ bool linkDebugInfo(object::ObjectFile &File, const Options &Options,
   // Create output streamer.
   DwarfStreamer OutStreamer(OutputFileType::Object, OutStream, nullptr,
                             ReportWarn, ReportWarn);
-  if (!OutStreamer.init(File.makeTriple(), ""))
-    return false;
+  Triple TargetTriple = File.makeTriple();
+  if (!OutStreamer.init(TargetTriple, formatv("cannot create a stream for {0}",
+                                              TargetTriple.getTriple())
+                                          .str()))
+    return createStringError(std::errc::invalid_argument, "");
+
+  std::unique_ptr<DWARFContext> Context = DWARFContext::create(File);
+
+  uint16_t MaxDWARFVersion = 0;
+  std::function<void(const DWARFUnit &Unit)> OnCUDieLoaded =
+      [&MaxDWARFVersion](const DWARFUnit &Unit) {
+        MaxDWARFVersion = std::max(Unit.getVersion(), MaxDWARFVersion);
+      };
 
   // Create DWARF linker.
   DWARFLinker DebugInfoLinker(&OutStreamer, DwarfLinkerClient::LLD);
 
   DebugInfoLinker.setEstimatedObjfilesAmount(1);
-  DebugInfoLinker.setAccelTableKind(DwarfLinkerAccelTableKind::None);
   DebugInfoLinker.setErrorHandler(ReportErr);
   DebugInfoLinker.setWarningHandler(ReportWarn);
   DebugInfoLinker.setNumThreads(Options.NumThreads);
@@ -258,7 +308,15 @@ bool linkDebugInfo(object::ObjectFile &File, const Options &Options,
   std::vector<std::unique_ptr<AddressesMap>> AddresssMapForLinking(1);
   std::vector<std::string> EmptyWarnings;
 
-  std::unique_ptr<DWARFContext> Context = DWARFContext::create(File);
+  // Unknown debug sections would be removed. Display warning
+  // for such sections.
+  for (SectionName Sec : Context->getDWARFObj().getSectionNames()) {
+    if (isDebugSection(Sec.Name) && !knownByDWARFUtil(Sec.Name))
+      warning(
+          formatv("'{0}' is not currently supported: section will be skipped",
+                  Sec.Name),
+          Options.InputFileName);
+  }
 
   // Add object files to the DWARFLinker.
   AddresssMapForLinking[0] =
@@ -269,12 +327,22 @@ bool linkDebugInfo(object::ObjectFile &File, const Options &Options,
       EmptyWarnings);
 
   for (size_t I = 0; I < ObjectsForLinking.size(); I++)
-    DebugInfoLinker.addObjectFile(*ObjectsForLinking[I]);
+    DebugInfoLinker.addObjectFile(*ObjectsForLinking[I], nullptr,
+                                  OnCUDieLoaded);
+
+  // If we haven't seen any CUs, pick an arbitrary valid Dwarf version anyway.
+  if (MaxDWARFVersion == 0)
+    MaxDWARFVersion = 3;
+
+  if (Error Err = DebugInfoLinker.setTargetDWARFVersion(MaxDWARFVersion))
+    return Err;
 
   // Link debug info.
-  DebugInfoLinker.link();
+  if (Error Err = DebugInfoLinker.link())
+    return Err;
+
   OutStreamer.finish();
-  return true;
+  return Error::success();
 }
 
 } // end of namespace dwarfutil

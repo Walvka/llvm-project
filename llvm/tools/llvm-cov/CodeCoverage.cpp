@@ -41,6 +41,7 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <system_error>
 
 using namespace llvm;
@@ -157,7 +158,7 @@ private:
 
   /// The coverage data path to be remapped from, and the source path to be
   /// remapped to, when using -path-equivalence.
-  Optional<std::pair<std::string, std::string>> PathRemapping;
+  std::optional<std::pair<std::string, std::string>> PathRemapping;
 
   /// File status cache used when finding the same file.
   StringMap<Optional<sys::fs::file_status>> FileStatusCache;
@@ -436,8 +437,7 @@ std::unique_ptr<CoverageMapping> CodeCoverageTool::load() {
       CoverageMapping::load(ObjectFilenames, PGOFilename, CoverageArches,
                             ViewOpts.CompilationDirectory);
   if (Error E = CoverageOrErr.takeError()) {
-    error("Failed to load coverage: " + toString(std::move(E)),
-          join(ObjectFilenames.begin(), ObjectFilenames.end(), ", "));
+    error("Failed to load coverage: " + toString(std::move(E)));
     return nullptr;
   }
   auto Coverage = std::move(CoverageOrErr.get());
@@ -556,11 +556,13 @@ void CodeCoverageTool::demangleSymbols(const CoverageMapping &Coverage) {
   std::vector<StringRef> ArgsV;
   for (StringRef Arg : ViewOpts.DemanglerOpts)
     ArgsV.push_back(Arg);
-  Optional<StringRef> Redirects[] = {InputPath.str(), OutputPath.str(), {""}};
+  std::optional<StringRef> Redirects[] = {
+      InputPath.str(), OutputPath.str(), {""}};
   std::string ErrMsg;
-  int RC = sys::ExecuteAndWait(ViewOpts.DemanglerOpts[0], ArgsV,
-                               /*env=*/None, Redirects, /*secondsToWait=*/0,
-                               /*memoryLimit=*/0, &ErrMsg);
+  int RC =
+      sys::ExecuteAndWait(ViewOpts.DemanglerOpts[0], ArgsV,
+                          /*env=*/std::nullopt, Redirects, /*secondsToWait=*/0,
+                          /*memoryLimit=*/0, &ErrMsg);
   if (RC) {
     error(ErrMsg, ViewOpts.DemanglerOpts[0]);
     return;
@@ -670,13 +672,6 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       "name-allowlist", cl::Optional,
       cl::desc("Show code coverage only for functions listed in the given "
                "file"),
-      cl::cat(FilteringCategory));
-
-  // Allow for accepting previous option name.
-  cl::list<std::string> NameFilterFilesDeprecated(
-      "name-whitelist", cl::Optional, cl::Hidden,
-      cl::desc("Show code coverage only for functions listed in the given "
-               "file. Deprecated, use -name-allowlist instead"),
       cl::cat(FilteringCategory));
 
   cl::list<std::string> NameRegexFilters(
@@ -816,16 +811,10 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
     }
 
     // Read in -name-allowlist files.
-    if (!NameFilterFiles.empty() || !NameFilterFilesDeprecated.empty()) {
+    if (!NameFilterFiles.empty()) {
       std::string SpecialCaseListErr;
-      if (!NameFilterFiles.empty())
-        NameAllowlist = SpecialCaseList::create(
-            NameFilterFiles, *vfs::getRealFileSystem(), SpecialCaseListErr);
-      if (!NameFilterFilesDeprecated.empty())
-        NameAllowlist = SpecialCaseList::create(NameFilterFilesDeprecated,
-                                                *vfs::getRealFileSystem(),
-                                                SpecialCaseListErr);
-
+      NameAllowlist = SpecialCaseList::create(
+          NameFilterFiles, *vfs::getRealFileSystem(), SpecialCaseListErr);
       if (!NameAllowlist)
         error(SpecialCaseListErr);
     }
@@ -835,14 +824,9 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       auto NameFilterer = std::make_unique<CoverageFilters>();
       for (const auto &Name : NameFilters)
         NameFilterer->push_back(std::make_unique<NameCoverageFilter>(Name));
-      if (NameAllowlist) {
-        if (!NameFilterFiles.empty())
-          NameFilterer->push_back(
-              std::make_unique<NameAllowlistCoverageFilter>(*NameAllowlist));
-        if (!NameFilterFilesDeprecated.empty())
-          NameFilterer->push_back(
-              std::make_unique<NameWhitelistCoverageFilter>(*NameAllowlist));
-      }
+      if (NameAllowlist && !NameFilterFiles.empty())
+        NameFilterer->push_back(
+            std::make_unique<NameAllowlistCoverageFilter>(*NameAllowlist));
       for (const auto &Regex : NameRegexFilters)
         NameFilterer->push_back(
             std::make_unique<NameRegexCoverageFilter>(Regex));
@@ -1211,12 +1195,17 @@ int CodeCoverageTool::doExport(int argc, const char **argv,
                               cl::desc("Don't export per-function data"),
                               cl::cat(ExportCategory));
 
+  cl::opt<bool> SkipBranches("skip-branches", cl::Optional,
+                              cl::desc("Don't export branch data (LCOV)"),
+                              cl::cat(ExportCategory));
+
   auto Err = commandLineParser(argc, argv);
   if (Err)
     return Err;
 
   ViewOpts.SkipExpansions = SkipExpansions;
   ViewOpts.SkipFunctions = SkipFunctions;
+  ViewOpts.SkipBranches = SkipBranches;
 
   if (ViewOpts.Format != CoverageViewOptions::OutputFormat::Text &&
       ViewOpts.Format != CoverageViewOptions::OutputFormat::Lcov) {

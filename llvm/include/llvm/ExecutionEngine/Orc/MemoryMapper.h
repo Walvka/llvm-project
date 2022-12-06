@@ -14,6 +14,8 @@
 #define LLVM_EXECUTIONENGINE_ORC_MEMORYMAPPER_H
 
 #include "llvm/ExecutionEngine/Orc/Core.h"
+#include "llvm/ExecutionEngine/Orc/Shared/MemoryFlags.h"
+#include "llvm/Support/Process.h"
 
 #include <mutex>
 
@@ -31,7 +33,7 @@ public:
       const char *WorkingMem;
       size_t ContentSize;
       size_t ZeroFillSize;
-      unsigned Prot;
+      AllocGroup AG;
     };
 
     ExecutorAddr MappingBase;
@@ -40,6 +42,9 @@ public:
   };
 
   using OnReservedFunction = unique_function<void(Expected<ExecutorAddrRange>)>;
+
+  // Page size of the target process
+  virtual unsigned int getPageSize() = 0;
 
   /// Reserves address space in executor process
   virtual void reserve(size_t NumBytes, OnReservedFunction OnReserved) = 0;
@@ -74,9 +79,13 @@ public:
   virtual ~MemoryMapper();
 };
 
-class InProcessMemoryMapper final : public MemoryMapper {
+class InProcessMemoryMapper : public MemoryMapper {
 public:
-  InProcessMemoryMapper() {}
+  InProcessMemoryMapper(size_t PageSize);
+
+  static Expected<std::unique_ptr<InProcessMemoryMapper>> Create();
+
+  unsigned int getPageSize() override { return PageSize; }
 
   void reserve(size_t NumBytes, OnReservedFunction OnReserved) override;
 
@@ -94,6 +103,7 @@ public:
 
 private:
   struct Allocation {
+    size_t Size;
     std::vector<shared::WrapperFunctionCall> DeinitializationActions;
   };
   using AllocationMap = DenseMap<ExecutorAddr, Allocation>;
@@ -107,6 +117,8 @@ private:
   std::mutex Mutex;
   ReservationMap Reservations;
   AllocationMap Allocations;
+
+  size_t PageSize;
 };
 
 class SharedMemoryMapper final : public MemoryMapper {
@@ -119,8 +131,13 @@ public:
     ExecutorAddr Release;
   };
 
-  SharedMemoryMapper(ExecutorProcessControl &EPC, SymbolAddrs SAs)
-      : EPC(EPC), SAs(SAs) {}
+  SharedMemoryMapper(ExecutorProcessControl &EPC, SymbolAddrs SAs,
+                     size_t PageSize);
+
+  static Expected<std::unique_ptr<SharedMemoryMapper>>
+  Create(ExecutorProcessControl &EPC, SymbolAddrs SAs);
+
+  unsigned int getPageSize() override { return PageSize; }
 
   void reserve(size_t NumBytes, OnReservedFunction OnReserved) override;
 
@@ -148,6 +165,8 @@ private:
   std::mutex Mutex;
 
   std::map<ExecutorAddr, Reservation> Reservations;
+
+  size_t PageSize;
 };
 
 } // namespace orc

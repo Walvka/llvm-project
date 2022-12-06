@@ -332,7 +332,7 @@ scanPreamble(llvm::StringRef Contents, const tooling::CompileCommand &Cmd) {
       std::move(CI), nullptr, std::move(PreambleContents),
       // Provide an empty FS to prevent preprocessor from performing IO. This
       // also implies missing resolved paths for includes.
-      FS.view(llvm::None), IgnoreDiags);
+      FS.view(std::nullopt), IgnoreDiags);
   if (Clang->getFrontendOpts().Inputs.empty())
     return error("compiler instance had no inputs");
   // We are only interested in main file includes.
@@ -552,7 +552,7 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
   }
 
   if (BuiltPreamble) {
-    vlog("Built preamble of size {0} for file {1} version {2} in {3} seconds",
+    log("Built preamble of size {0} for file {1} version {2} in {3} seconds",
          BuiltPreamble->getSize(), FileName, Inputs.Version,
          PreambleTimer.getTime());
     std::vector<Diag> Diags = PreambleDiagnostics.take();
@@ -571,6 +571,12 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
 
   elog("Could not build a preamble for file {0} version {1}: {2}", FileName,
        Inputs.Version, BuiltPreamble.getError().message());
+  for (const Diag &D : PreambleDiagnostics.take()) {
+    if (D.Severity < DiagnosticsEngine::Error)
+      continue;
+    // Not an ideal way to show errors, but better than nothing!
+    elog("  error: {0}", D.Message);
+  }
   return nullptr;
 }
 

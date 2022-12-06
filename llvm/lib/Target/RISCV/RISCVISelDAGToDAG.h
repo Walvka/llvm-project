@@ -49,6 +49,8 @@ public:
   bool SelectFrameAddrRegImm(SDValue Addr, SDValue &Base, SDValue &Offset);
   bool SelectAddrRegImm(SDValue Addr, SDValue &Base, SDValue &Offset);
 
+  bool tryShrinkShlLogicImm(SDNode *Node);
+
   bool selectShiftMask(SDValue N, unsigned ShiftWidth, SDValue &ShAmt);
   bool selectShiftMaskXLen(SDValue N, SDValue &ShAmt) {
     return selectShiftMask(N, Subtarget->getXLen(), ShAmt);
@@ -58,17 +60,19 @@ public:
   }
 
   bool selectSExti32(SDValue N, SDValue &Val);
-  bool selectZExti32(SDValue N, SDValue &Val);
+  bool selectZExtBits(SDValue N, unsigned Bits, SDValue &Val);
+  template <unsigned Bits> bool selectZExtBits(SDValue N, SDValue &Val) {
+    return selectZExtBits(N, Bits, Val);
+  }
 
   bool selectSHXADDOp(SDValue N, unsigned ShAmt, SDValue &Val);
-  bool selectSH1ADDOp(SDValue N, SDValue &Val) {
-    return selectSHXADDOp(N, 1, Val);
+  template <unsigned ShAmt> bool selectSHXADDOp(SDValue N, SDValue &Val) {
+    return selectSHXADDOp(N, ShAmt, Val);
   }
-  bool selectSH2ADDOp(SDValue N, SDValue &Val) {
-    return selectSHXADDOp(N, 2, Val);
-  }
-  bool selectSH3ADDOp(SDValue N, SDValue &Val) {
-    return selectSHXADDOp(N, 3, Val);
+
+  bool selectSHXADD_UWOp(SDValue N, unsigned ShAmt, SDValue &Val);
+  template <unsigned ShAmt> bool selectSHXADD_UWOp(SDValue N, SDValue &Val) {
+    return selectSHXADD_UWOp(N, ShAmt, Val);
   }
 
   bool hasAllNBitUsers(SDNode *Node, unsigned Bits) const;
@@ -130,6 +134,9 @@ public:
 private:
   bool doPeepholeSExtW(SDNode *Node);
   bool doPeepholeMaskedRVV(SDNode *Node);
+  bool doPeepholeMergeVVMFold();
+  bool performVMergeToVAdd(SDNode *N);
+  bool performCombineVMergeAndVOps(SDNode *N, bool IsTA);
 };
 
 namespace RISCV {

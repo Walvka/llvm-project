@@ -469,13 +469,13 @@ public:
     assert(i < lhsBases.size());
     if (lhsBases[counter])
       return findBinding(*lhsBases[counter]);
-    return llvm::None;
+    return std::nullopt;
   }
 
   /// Return the outermost loop in this FORALL nest.
   fir::DoLoopOp getOuterLoop() {
     assert(outerLoop.has_value());
-    return outerLoop.getValue();
+    return outerLoop.value();
   }
 
   /// Return the statement context for the entire, outermost FORALL construct.
@@ -565,7 +565,7 @@ template <typename A>
 bool symbolSetsIntersect(llvm::ArrayRef<FrontEndSymbol> ctrlSet,
                          const A &exprSyms) {
   for (const auto &sym : exprSyms)
-    if (std::find(ctrlSet.begin(), ctrlSet.end(), &sym.get()) != ctrlSet.end())
+    if (llvm::is_contained(ctrlSet, &sym.get()))
       return true;
   return false;
 }

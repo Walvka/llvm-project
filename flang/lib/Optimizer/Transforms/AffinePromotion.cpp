@@ -15,7 +15,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "PassDetail.h"
 #include "flang/Optimizer/Dialect/FIRDialect.h"
 #include "flang/Optimizer/Dialect/FIROps.h"
 #include "flang/Optimizer/Dialect/FIRType.h"
@@ -30,6 +29,11 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/Debug.h"
+
+namespace fir {
+#define GEN_PASS_DEF_AFFINEDIALECTPROMOTION
+#include "flang/Optimizer/Transforms/Passes.h.inc"
+} // namespace fir
 
 #define DEBUG_TYPE "flang-affine-promotion"
 
@@ -175,7 +179,7 @@ struct AffineIfCondition {
 
   mlir::IntegerSet getIntegerSet() const {
     assert(hasIntegerSet() && "integer set is missing");
-    return integerSet.getValue();
+    return integerSet.value();
   }
 
   mlir::ValueRange getAffineArgs() const { return affineArgs; }
@@ -235,13 +239,12 @@ private:
     auto rhsAffine = toAffineExpr(cmpOp.getRhs());
     if (!lhsAffine || !rhsAffine)
       return;
-    auto constraintPair = constraint(
-        cmpOp.getPredicate(), rhsAffine.getValue() - lhsAffine.getValue());
+    auto constraintPair =
+        constraint(cmpOp.getPredicate(), *rhsAffine - *lhsAffine);
     if (!constraintPair)
       return;
-    integerSet = mlir::IntegerSet::get(dimCount, symCount,
-                                       {constraintPair.getValue().first},
-                                       {constraintPair.getValue().second});
+    integerSet = mlir::IntegerSet::get(
+        dimCount, symCount, {constraintPair->first}, {constraintPair->second});
   }
 
   llvm::Optional<std::pair<AffineExpr, bool>>
@@ -407,7 +410,8 @@ createAffineOps(mlir::Value arrayRef, mlir::PatternRewriter &rewriter) {
   auto affineApply = rewriter.create<mlir::AffineApplyOp>(acoOp.getLoc(),
                                                           affineMap, indexArgs);
   auto arrayElementType = coordinateArrayElement(acoOp);
-  auto newType = mlir::MemRefType::get({-1}, arrayElementType);
+  auto newType =
+      mlir::MemRefType::get({mlir::ShapedType::kDynamic}, arrayElementType);
   auto arrayConvert = rewriter.create<fir::ConvertOp>(acoOp.getLoc(), newType,
                                                       acoOp.getMemref());
   return std::make_pair(affineApply, arrayConvert);
@@ -482,8 +486,8 @@ private:
   std::pair<mlir::AffineForOp, mlir::Value>
   createAffineFor(fir::DoLoopOp op, mlir::PatternRewriter &rewriter) const {
     if (auto constantStep = constantIntegerLike(op.getStep()))
-      if (constantStep.getValue() > 0)
-        return positiveConstantStep(op, constantStep.getValue(), rewriter);
+      if (*constantStep > 0)
+        return positiveConstantStep(op, *constantStep, rewriter);
     return genericBounds(op, rewriter);
   }
 
@@ -580,7 +584,7 @@ public:
 /// Promote fir.do_loop and fir.if to affine.for and affine.if, in the cases
 /// where such a promotion is possible.
 class AffineDialectPromotion
-    : public AffineDialectPromotionBase<AffineDialectPromotion> {
+    : public fir::impl::AffineDialectPromotionBase<AffineDialectPromotion> {
 public:
   void runOnOperation() override {
 
@@ -592,9 +596,9 @@ public:
     patterns.insert<AffineIfConversion>(context, functionAnalysis);
     patterns.insert<AffineLoopConversion>(context, functionAnalysis);
     mlir::ConversionTarget target = *context;
-    target.addLegalDialect<
-        mlir::AffineDialect, FIROpsDialect, mlir::scf::SCFDialect,
-        mlir::arith::ArithmeticDialect, mlir::func::FuncDialect>();
+    target.addLegalDialect<mlir::AffineDialect, FIROpsDialect,
+                           mlir::scf::SCFDialect, mlir::arith::ArithDialect,
+                           mlir::func::FuncDialect>();
     target.addDynamicallyLegalOp<IfOp>([&functionAnalysis](fir::IfOp op) {
       return !(functionAnalysis.getChildIfAnalysis(op).canPromoteToAffine());
     });

@@ -33,6 +33,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -349,7 +350,7 @@ CoverageMapping::load(ArrayRef<StringRef> ObjectFilenames,
                       StringRef CompilationDir) {
   auto ProfileReaderOrErr = IndexedInstrProfReader::create(ProfileFilename);
   if (Error E = ProfileReaderOrErr.takeError())
-    return std::move(E);
+    return createFileError(ProfileFilename, std::move(E));
   auto ProfileReader = std::move(ProfileReaderOrErr.get());
   auto Coverage = std::unique_ptr<CoverageMapping>(new CoverageMapping());
   bool DataFound = false;
@@ -358,7 +359,7 @@ CoverageMapping::load(ArrayRef<StringRef> ObjectFilenames,
     auto CovMappingBufOrErr = MemoryBuffer::getFileOrSTDIN(
         File.value(), /*IsText=*/false, /*RequiresNullTerminator=*/false);
     if (std::error_code EC = CovMappingBufOrErr.getError())
-      return errorCodeToError(EC);
+      return createFileError(File.value(), errorCodeToError(EC));
     StringRef Arch = Arches.empty() ? StringRef() : Arches[File.index()];
     MemoryBufferRef CovMappingBufRef =
         CovMappingBufOrErr.get()->getMemBufferRef();
@@ -368,7 +369,7 @@ CoverageMapping::load(ArrayRef<StringRef> ObjectFilenames,
     if (Error E = CoverageReadersOrErr.takeError()) {
       E = handleMaybeNoDataFoundError(std::move(E));
       if (E)
-        return std::move(E);
+        return createFileError(File.value(), std::move(E));
       // E == success (originally a no_data_found error).
       continue;
     }
@@ -378,12 +379,14 @@ CoverageMapping::load(ArrayRef<StringRef> ObjectFilenames,
       Readers.push_back(std::move(Reader));
     DataFound |= !Readers.empty();
     if (Error E = loadFromReaders(Readers, *ProfileReader, *Coverage))
-      return std::move(E);
+      return createFileError(File.value(), std::move(E));
   }
   // If no readers were created, either no objects were provided or none of them
   // had coverage data. Return an error in the latter case.
   if (!DataFound && !ObjectFilenames.empty())
-    return make_error<CoverageMapError>(coveragemap_error::no_data_found);
+    return createFileError(
+        join(ObjectFilenames.begin(), ObjectFilenames.end(), ", "),
+        make_error<CoverageMapError>(coveragemap_error::no_data_found));
   return std::move(Coverage);
 }
 
@@ -456,7 +459,7 @@ class SegmentBuilder {
   /// \p Loc: The start location of the next region. If None, all active
   /// regions are completed.
   /// \p FirstCompletedRegion: Index of the first completed region.
-  void completeRegionsUntil(Optional<LineColPair> Loc,
+  void completeRegionsUntil(std::optional<LineColPair> Loc,
                             unsigned FirstCompletedRegion) {
     // Sort the completed regions by end location. This makes it simple to
     // emit closing segments in sorted order.
@@ -555,7 +558,7 @@ class SegmentBuilder {
 
     // Complete any remaining active regions.
     if (!ActiveRegions.empty())
-      completeRegionsUntil(None, 0);
+      completeRegionsUntil(std::nullopt, 0);
   }
 
   /// Sort a nested sequence of regions from a single file.
@@ -681,18 +684,19 @@ static Optional<unsigned> findMainViewFileID(const FunctionRecord &Function) {
       IsNotExpandedFile[CR.ExpandedFileID] = false;
   int I = IsNotExpandedFile.find_first();
   if (I == -1)
-    return None;
+    return std::nullopt;
   return I;
 }
 
 /// Check if SourceFile is the file that contains the definition of
-/// the Function. Return the ID of the file in that case or None otherwise.
+/// the Function. Return the ID of the file in that case or std::nullopt
+/// otherwise.
 static Optional<unsigned> findMainViewFileID(StringRef SourceFile,
                                              const FunctionRecord &Function) {
   Optional<unsigned> I = findMainViewFileID(Function);
   if (I && SourceFile == Function.Filenames[*I])
     return I;
-  return None;
+  return std::nullopt;
 }
 
 static bool isExpansion(const CountedRegion &R, unsigned FileID) {

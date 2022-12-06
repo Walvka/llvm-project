@@ -298,7 +298,7 @@ static ObjCMethodDecl *getNSNumberFactoryMethod(Sema &S, SourceLocation Loc,
                                              &CX.Idents.get("value"),
                                              NumberType, /*TInfo=*/nullptr,
                                              SC_None, nullptr);
-    Method->setMethodParams(S.Context, value, None);
+    Method->setMethodParams(S.Context, value, std::nullopt);
   }
 
   if (!validateBoxingMethod(S, Loc, S.NSNumberDecl, Sel, Method))
@@ -577,7 +577,7 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
                                 Context.getPointerType(ConstCharType),
                                 /*TInfo=*/nullptr,
                                 SC_None, nullptr);
-          M->setMethodParams(Context, value, None);
+          M->setMethodParams(Context, value, std::nullopt);
           BoxingMethod = M;
         }
 
@@ -705,7 +705,7 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
                             SC_None, nullptr);
         Params.push_back(type);
 
-        M->setMethodParams(Context, Params, None);
+        M->setMethodParams(Context, Params, std::nullopt);
         BoxingMethod = M;
       }
 
@@ -833,7 +833,7 @@ ExprResult Sema::BuildObjCArrayLiteral(SourceRange SR, MultiExprArg Elements) {
                                              /*TInfo=*/nullptr, SC_None,
                                              nullptr);
       Params.push_back(cnt);
-      Method->setMethodParams(Context, Params, None);
+      Method->setMethodParams(Context, Params, std::nullopt);
     }
 
     if (!validateBoxingMethod(*this, Loc, NSArrayDecl, Sel, Method))
@@ -1003,7 +1003,7 @@ ExprResult Sema::BuildObjCDictionaryLiteral(SourceRange SR,
                                              /*TInfo=*/nullptr, SC_None,
                                              nullptr);
       Params.push_back(cnt);
-      Method->setMethodParams(Context, Params, None);
+      Method->setMethodParams(Context, Params, std::nullopt);
     }
 
     if (!validateBoxingMethod(*this, SR.getBegin(), NSDictionaryDecl, Sel,
@@ -3860,7 +3860,7 @@ static inline T *getObjCBridgeAttr(const TypedefType *TD) {
 
 static ObjCBridgeRelatedAttr *ObjCBridgeRelatedAttrFromType(QualType T,
                                                             TypedefNameDecl *&TDNDecl) {
-  while (const TypedefType *TD = dyn_cast<TypedefType>(T.getTypePtr())) {
+  while (const auto *TD = T->getAs<TypedefType>()) {
     TDNDecl = TD->getDecl();
     if (ObjCBridgeRelatedAttr *ObjCBAttr =
         getObjCBridgeAttr<ObjCBridgeRelatedAttr>(TD))
@@ -4007,7 +4007,7 @@ static bool CheckObjCBridgeNSCast(Sema &S, QualType castType, Expr *castExpr,
                                   bool &HadTheAttribute, bool warn) {
   QualType T = castExpr->getType();
   HadTheAttribute = false;
-  while (const TypedefType *TD = dyn_cast<TypedefType>(T.getTypePtr())) {
+  while (const auto *TD = T->getAs<TypedefType>()) {
     TypedefNameDecl *TDNDecl = TD->getDecl();
     if (TB *ObjCBAttr = getObjCBridgeAttr<TB>(TD)) {
       if (IdentifierInfo *Parm = ObjCBAttr->getBridgedType()) {
@@ -4070,7 +4070,7 @@ static bool CheckObjCBridgeCFCast(Sema &S, QualType castType, Expr *castExpr,
                                   bool &HadTheAttribute, bool warn) {
   QualType T = castType;
   HadTheAttribute = false;
-  while (const TypedefType *TD = dyn_cast<TypedefType>(T.getTypePtr())) {
+  while (const auto *TD = T->getAs<TypedefType>()) {
     TypedefNameDecl *TDNDecl = TD->getDecl();
     if (TB *ObjCBAttr = getObjCBridgeAttr<TB>(TD)) {
       if (IdentifierInfo *Parm = ObjCBAttr->getBridgedType()) {
@@ -4377,11 +4377,9 @@ Sema::CheckObjCBridgeRelatedConversions(SourceLocation Loc,
         Diag(RelatedClass->getBeginLoc(), diag::note_declared_at);
         Diag(TDNDecl->getBeginLoc(), diag::note_declared_at);
 
-        ExprResult msg =
-          BuildInstanceMessageImplicit(SrcExpr, SrcType,
-                                       InstanceMethod->getLocation(),
-                                       InstanceMethod->getSelector(),
-                                       InstanceMethod, None);
+        ExprResult msg = BuildInstanceMessageImplicit(
+            SrcExpr, SrcType, InstanceMethod->getLocation(),
+            InstanceMethod->getSelector(), InstanceMethod, std::nullopt);
         SrcExpr = msg.get();
       }
       return true;

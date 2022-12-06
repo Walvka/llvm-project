@@ -10,7 +10,7 @@ load("@bazel_skylib//lib:selects.bzl", "selects")
 LIBC_ROOT_TARGET = ":libc_root"
 INTERNAL_SUFFIX = ".__internal__"
 
-def libc_function(name, srcs, deps = None, copts = None, **kwargs):
+def libc_function(name, srcs, weak = False, deps = None, copts = None, **kwargs):
     """Add target for a libc function.
 
     The libc function is eventually available as a cc_library target by name
@@ -23,6 +23,7 @@ def libc_function(name, srcs, deps = None, copts = None, **kwargs):
       name: Target name. It is normally the name of the function this target is
             for.
       srcs: The .cpp files which contain the function implementation.
+      weak: Whether the symbol is marked weak.
       deps: The list of target dependencies if any.
       copts: The list of options to add to the C++ compilation command.
       **kwargs: Other attributes relevant for a cc_library. For example, deps.
@@ -47,6 +48,8 @@ def libc_function(name, srcs, deps = None, copts = None, **kwargs):
 
     # This second target is the llvm libc C function.
     copts.append("-DLLVM_LIBC_PUBLIC_PACKAGING")
+    if weak:
+        copts.append("-DLLVM_LIBC_FUNCTION_ATTR=__attribute__((weak))")
     native.cc_library(
         name = name,
         srcs = srcs,
@@ -79,9 +82,25 @@ def libc_math_function(
         select_map[PLATFORM_CPU_ARM64] = ["src/math/aarch64/" + name + ".cpp"]
     if "x86_64" in specializations:
         select_map[PLATFORM_CPU_X86_64] = ["src/math/x86_64/" + name + ".cpp"]
+
+    #TODO(michaelrj): Fix the floating point dependencies
+    OLD_FPUTIL_DEPS = [
+        ":__support_fputil_basic_operations",
+        ":__support_fputil_division_and_remainder_operations",
+        ":__support_fputil_fenv_impl",
+        ":__support_fputil_fp_bits",
+        ":__support_fputil_float_properties",
+        ":__support_fputil_hypot",
+        ":__support_fputil_manipulation_functions",
+        ":__support_fputil_nearest_integer_operations",
+        ":__support_fputil_normal_float",
+        ":__support_fputil_platform_defs",
+        ":__support_builtin_wrappers",
+        ":__support_fputil_except_value_utils",
+    ]
     libc_function(
         name = name,
         srcs = selects.with_or(select_map),
         hdrs = ["src/math/" + name + ".h"],
-        deps = [":__support_common", ":__support_fputil"] + additional_deps,
+        deps = [":__support_common"] + OLD_FPUTIL_DEPS + additional_deps,
     )

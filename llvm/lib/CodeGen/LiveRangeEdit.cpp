@@ -24,9 +24,10 @@ using namespace llvm;
 
 #define DEBUG_TYPE "regalloc"
 
-STATISTIC(NumDCEDeleted,     "Number of instructions deleted by DCE");
-STATISTIC(NumDCEFoldedLoads, "Number of single use loads folded after DCE");
-STATISTIC(NumFracRanges,     "Number of live ranges fractured by DCE");
+STATISTIC(NumDCEDeleted,        "Number of instructions deleted by DCE");
+STATISTIC(NumDCEFoldedLoads,    "Number of single use loads folded after DCE");
+STATISTIC(NumFracRanges,        "Number of live ranges fractured by DCE");
+STATISTIC(NumReMaterialization, "Number of instructions rematerialized");
 
 void LiveRangeEdit::Delegate::anchor() { }
 
@@ -134,9 +135,11 @@ bool LiveRangeEdit::allUsesAvailableAt(const MachineInstr *OrigMI,
       return false;
 
     // Check that subrange is live at UseIdx.
-    if (MO.getSubReg()) {
+    if (li.hasSubRanges()) {
       const TargetRegisterInfo *TRI = MRI.getTargetRegisterInfo();
-      LaneBitmask LM = TRI->getSubRegIndexLaneMask(MO.getSubReg());
+      unsigned SubReg = MO.getSubReg();
+      LaneBitmask LM = SubReg ? TRI->getSubRegIndexLaneMask(SubReg)
+                              : MRI.getMaxLaneMaskForVReg(MO.getReg());
       for (LiveInterval::SubRange &SR : li.subranges()) {
         if ((SR.LaneMask & LM).none())
           continue;
@@ -181,14 +184,20 @@ SlotIndex LiveRangeEdit::rematerializeAt(MachineBasicBlock &MBB,
                                          unsigned DestReg,
                                          const Remat &RM,
                                          const TargetRegisterInfo &tri,
-                                         bool Late) {
+                                         bool Late,
+                                         unsigned SubIdx,
+                                         MachineInstr *ReplaceIndexMI) {
   assert(RM.OrigMI && "Invalid remat");
-  TII.reMaterialize(MBB, MI, DestReg, 0, *RM.OrigMI, tri);
+  TII.reMaterialize(MBB, MI, DestReg, SubIdx, *RM.OrigMI, tri);
   // DestReg of the cloned instruction cannot be Dead. Set isDead of DestReg
   // to false anyway in case the isDead flag of RM.OrigMI's dest register
   // is true.
   (*--MI).getOperand(0).setIsDead(false);
   Rematted.insert(RM.ParentVNI);
+  ++NumReMaterialization;
+
+  if (ReplaceIndexMI)
+    return LIS.ReplaceMachineInstrInMaps(*ReplaceIndexMI, *MI).getRegSlot();
   return LIS.getSlotIndexes()->insertMachineInstrInMaps(*MI, Late).getRegSlot();
 }
 
@@ -300,13 +309,15 @@ void LiveRangeEdit::eliminateDeadDef(MachineInstr *MI, ToShrinkSet &ToShrink) {
   SmallVector<unsigned, 8> RegsToErase;
   bool ReadsPhysRegs = false;
   bool isOrigDef = false;
-  unsigned Dest;
+  Register Dest;
+  unsigned DestSubReg;
   // Only optimize rematerialize case when the instruction has one def, since
   // otherwise we could leave some dead defs in the code.  This case is
   // extremely rare.
   if (VRM && MI->getOperand(0).isReg() && MI->getOperand(0).isDef() &&
       MI->getDesc().getNumDefs() == 1) {
     Dest = MI->getOperand(0).getReg();
+    DestSubReg = MI->getOperand(0).getSubReg();
     unsigned Original = VRM->getOriginal(Dest);
     LiveInterval &OrigLI = LIS.getInterval(Original);
     VNInfo *OrigVNI = OrigLI.getVNInfoAt(Idx);
@@ -384,8 +395,18 @@ void LiveRangeEdit::eliminateDeadDef(MachineInstr *MI, ToShrinkSet &ToShrink) {
     if (isOrigDef && DeadRemats && !HasLiveVRegUses &&
         TII.isTriviallyReMaterializable(*MI)) {
       LiveInterval &NewLI = createEmptyIntervalFrom(Dest, false);
-      VNInfo *VNI = NewLI.getNextValue(Idx, LIS.getVNInfoAllocator());
+      VNInfo::Allocator &Alloc = LIS.getVNInfoAllocator();
+      VNInfo *VNI = NewLI.getNextValue(Idx, Alloc);
       NewLI.addSegment(LiveInterval::Segment(Idx, Idx.getDeadSlot(), VNI));
+
+      if (DestSubReg) {
+        const TargetRegisterInfo *TRI = MRI.getTargetRegisterInfo();
+        auto *SR = NewLI.createSubRange(
+            Alloc, TRI->getSubRegIndexLaneMask(DestSubReg));
+        SR->addSegment(LiveInterval::Segment(Idx, Idx.getDeadSlot(),
+                                             SR->getNextValue(Idx, Alloc)));
+      }
+
       pop_back();
       DeadRemats->insert(MI);
       const TargetRegisterInfo &TRI = *MRI.getTargetRegisterInfo();

@@ -19,7 +19,6 @@
 #include "llvm/ADT/None.h"
 #include "llvm/CodeGen/MIRFormatter.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
-#include "llvm/CodeGen/MachineCombinerPattern.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -38,7 +37,6 @@
 
 namespace llvm {
 
-class AAResults;
 class DFAPacketizer;
 class InstrItineraryData;
 class LiveIntervals;
@@ -55,11 +53,14 @@ class ScheduleDAGMI;
 class ScheduleHazardRecognizer;
 class SDNode;
 class SelectionDAG;
+class SMSchedule;
+class SwingSchedulerDAG;
 class RegScavenger;
 class TargetRegisterClass;
 class TargetRegisterInfo;
 class TargetSchedModel;
 class TargetSubtargetInfo;
+enum class MachineCombinerPattern;
 
 template <class T> class SmallVectorImpl;
 
@@ -107,6 +108,11 @@ public:
 
   static bool isGenericOpcode(unsigned Opc) {
     return Opc <= TargetOpcode::GENERIC_OP_END;
+  }
+
+  static bool isGenericAtomicRMWOpcode(unsigned Opc) {
+    return Opc >= TargetOpcode::GENERIC_ATOMICRMW_OP_START &&
+           Opc <= TargetOpcode::GENERIC_ATOMICRMW_OP_END;
   }
 
   /// Given a machine instruction descriptor, returns the register
@@ -730,6 +736,13 @@ public:
     /// update with no users being pipelined.
     virtual bool shouldIgnoreForPipelining(const MachineInstr *MI) const = 0;
 
+    /// Return true if the proposed schedule should used.  Otherwise return
+    /// false to not pipeline the loop. This function should be used to ensure
+    /// that pipelined loops meet target-specific quality heuristics.
+    virtual bool shouldUseSchedule(SwingSchedulerDAG &SSD, SMSchedule &SMS) {
+      return true;
+    }
+
     /// Create a condition to determine if the trip count of the loop is greater
     /// than TC, where TC is always one more than for the previous prologue or
     /// 0 if this is being called for the outermost prologue.
@@ -741,7 +754,7 @@ public:
     ///
     /// Note: This hook is guaranteed to be called from the innermost to the
     /// outermost prologue of the loop being software pipelined.
-    virtual Optional<bool>
+    virtual std::optional<bool>
     createTripCountGreaterCondition(int TC, MachineBasicBlock &MBB,
                                     SmallVectorImpl<MachineOperand> &Cond) = 0;
 
@@ -996,9 +1009,9 @@ protected:
   /// If the specific machine instruction is a instruction that moves/copies
   /// value from one register to another register return destination and source
   /// registers as machine operands.
-  virtual Optional<DestSourcePair>
+  virtual std::optional<DestSourcePair>
   isCopyInstrImpl(const MachineInstr &MI) const {
-    return None;
+    return std::nullopt;
   }
 
   /// Return true if the given terminator MI is not expected to spill. This
@@ -1019,7 +1032,7 @@ public:
   /// For COPY-instruction the method naturally returns destination and source
   /// registers as machine operands, for all other instructions the method calls
   /// target-dependent implementation.
-  Optional<DestSourcePair> isCopyInstr(const MachineInstr &MI) const {
+  std::optional<DestSourcePair> isCopyInstr(const MachineInstr &MI) const {
     if (MI.isCopy()) {
       return DestSourcePair{MI.getOperand(0), MI.getOperand(1)};
     }
@@ -1030,9 +1043,9 @@ public:
   /// immediate value and a physical register, and stores the result in
   /// the given physical register \c Reg, return a pair of the source
   /// register and the offset which has been added.
-  virtual Optional<RegImmPair> isAddImmediate(const MachineInstr &MI,
-                                              Register Reg) const {
-    return None;
+  virtual std::optional<RegImmPair> isAddImmediate(const MachineInstr &MI,
+                                                   Register Reg) const {
+    return std::nullopt;
   }
 
   /// Returns true if MI is an instruction that defines Reg to have a constant
@@ -1135,8 +1148,8 @@ public:
   /// Return true if target supports reassociation of instructions in machine
   /// combiner pass to reduce register pressure for a given BB.
   virtual bool
-  shouldReduceRegisterPressure(MachineBasicBlock *MBB,
-                               RegisterClassInfo *RegClassInfo) const {
+  shouldReduceRegisterPressure(const MachineBasicBlock *MBB,
+                               const RegisterClassInfo *RegClassInfo) const {
     return false;
   }
 
@@ -1167,7 +1180,8 @@ public:
                                        const MachineBasicBlock *MBB) const;
 
   /// Return true when \P Inst has reassociable sibling.
-  bool hasReassociableSibling(const MachineInstr &Inst, bool &Commuted) const;
+  virtual bool hasReassociableSibling(const MachineInstr &Inst,
+                                      bool &Commuted) const;
 
   /// When getMachineCombinerPatterns() finds patterns, this function generates
   /// the instructions that could replace the original code sequence. The client
@@ -1366,10 +1380,10 @@ public:
   /// MachineInstr that is accessing memory. These values are returned as a
   /// struct ExtAddrMode which contains all relevant information to make up the
   /// address.
-  virtual Optional<ExtAddrMode>
+  virtual std::optional<ExtAddrMode>
   getAddrModeFromMemoryOp(const MachineInstr &MemI,
                           const TargetRegisterInfo *TRI) const {
-    return None;
+    return std::nullopt;
   }
 
   /// Returns true if MI's Def is NullValueReg, and the MI
@@ -1832,7 +1846,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<int, const char *>>
   getSerializableTargetIndices() const {
-    return None;
+    return std::nullopt;
   }
 
   /// Decompose the machine operand's target flags into two values - the direct
@@ -1849,7 +1863,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<unsigned, const char *>>
   getSerializableDirectMachineOperandTargetFlags() const {
-    return None;
+    return std::nullopt;
   }
 
   /// Return an array that contains the bitmask target flag values and their
@@ -1859,7 +1873,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<unsigned, const char *>>
   getSerializableBitmaskMachineOperandTargetFlags() const {
-    return None;
+    return std::nullopt;
   }
 
   /// Return an array that contains the MMO target flag values and their
@@ -1869,7 +1883,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<MachineMemOperand::Flags, const char *>>
   getSerializableMachineMemOperandTargetFlags() const {
-    return None;
+    return std::nullopt;
   }
 
   /// Determines whether \p Inst is a tail call instruction. Override this
@@ -1970,8 +1984,8 @@ public:
   /// Produce the expression describing the \p MI loading a value into
   /// the physical register \p Reg. This hook should only be used with
   /// \p MIs belonging to VReg-less functions.
-  virtual Optional<ParamLoadedValue> describeLoadedValue(const MachineInstr &MI,
-                                                         Register Reg) const;
+  virtual std::optional<ParamLoadedValue>
+  describeLoadedValue(const MachineInstr &MI, Register Reg) const;
 
   /// Given the generic extension instruction \p ExtMI, returns true if this
   /// extension is a likely candidate for being folded into an another

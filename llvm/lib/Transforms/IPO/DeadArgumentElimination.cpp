@@ -238,8 +238,8 @@ bool DeadArgumentEliminationPass::deleteDeadVarargs(Function &F) {
   // Clone metadata from the old function, including debug info descriptor.
   SmallVector<std::pair<unsigned, MDNode *>, 1> MDs;
   F.getAllMetadata(MDs);
-  for (auto MD : MDs)
-    NF->addMetadata(MD.first, *MD.second);
+  for (auto [KindID, Node] : MDs)
+    NF->addMetadata(KindID, *Node);
 
   // Fix up any BlockAddresses that refer to the function.
   F.replaceAllUsesWith(ConstantExpr::getBitCast(NF, F.getType()));
@@ -1056,14 +1056,14 @@ bool DeadArgumentEliminationPass::removeDeadStuffFromFunction(Function *F) {
         // value (possibly 0 if we became void).
         auto *NewRet = ReturnInst::Create(F->getContext(), RetVal, RI);
         NewRet->setDebugLoc(RI->getDebugLoc());
-        BB.getInstList().erase(RI);
+        RI->eraseFromParent();
       }
 
   // Clone metadata from the old function, including debug info descriptor.
   SmallVector<std::pair<unsigned, MDNode *>, 1> MDs;
   F->getAllMetadata(MDs);
-  for (auto MD : MDs)
-    NF->addMetadata(MD.first, *MD.second);
+  for (auto [KindID, Node] : MDs)
+    NF->addMetadata(KindID, *Node);
 
   // If either the return value(s) or argument(s) are removed, then probably the
   // function does not follow standard calling conventions anymore. Hence, add

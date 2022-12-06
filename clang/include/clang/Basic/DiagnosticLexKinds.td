@@ -80,6 +80,10 @@ def warn_cxx11_keyword : Warning<"'%0' is a keyword in C++11">,
   InGroup<CXX11Compat>, DefaultIgnore;
 def warn_cxx20_keyword : Warning<"'%0' is a keyword in C++20">,
   InGroup<CXX20Compat>, DefaultIgnore;
+def warn_c99_keyword : Warning<"'%0' is a keyword in C99">,
+  InGroup<C99Compat>, DefaultIgnore;
+def warn_c2x_keyword : Warning<"'%0' is a keyword in C2x">,
+  InGroup<C2xCompat>, DefaultIgnore;
 
 def ext_unterminated_char_or_string : ExtWarn<
   "missing terminating %select{'|'\"'}0 character">, InGroup<InvalidPPToken>;
@@ -387,7 +391,15 @@ def ext_pp_include_search_ms : ExtWarn<
 def ext_pp_ident_directive : Extension<"#ident is a language extension">;
 def ext_pp_include_next_directive : Extension<
   "#include_next is a language extension">, InGroup<GNUIncludeNext>;
-def ext_pp_warning_directive : Extension<"#warning is a language extension">;
+
+def ext_pp_warning_directive : Extension<
+  "#warning is a %select{C2x|C++2b}0 extension">;
+def warn_cxx2b_compat_warning_directive : Warning<
+  "#warning is incompatible with C++ standards before C++2b">,
+  InGroup<CXXPre2bCompat>, DefaultIgnore;
+def warn_c2x_compat_warning_directive : Warning<
+  "#warning is incompatible with C standards before C2x">,
+  InGroup<CPre2xCompat>, DefaultIgnore;
 
 def ext_pp_extra_tokens_at_eol : ExtWarn<
   "extra tokens at end of #%0 directive">, InGroup<ExtraTokens>;
@@ -449,7 +461,7 @@ def ext_pp_gnu_line_directive : Extension<
 def err_pp_invalid_directive : Error<
   "invalid preprocessing directive%select{|, did you mean '#%1'?}0">;
 def warn_pp_invalid_directive : Warning<
-  err_pp_invalid_directive.Text>, InGroup<DiagGroup<"unknown-directives">>;
+  err_pp_invalid_directive.Summary>, InGroup<DiagGroup<"unknown-directives">>;
 def err_pp_directive_required : Error<
   "%0 must be used within a preprocessing directive">;
 def err_pp_file_not_found : Error<"'%0' file not found">, DefaultFatal;
@@ -636,10 +648,14 @@ def warn_pragma_diagnostic_unknown_warning :
    ExtWarn<"unknown warning group '%0', ignored">,
    InGroup<UnknownWarningOption>;
 // - #pragma __debug
+def warn_pragma_debug_missing_command : Warning<
+  "missing debug command">, InGroup<IgnoredPragmas>;
 def warn_pragma_debug_unexpected_command : Warning<
   "unexpected debug command '%0'">, InGroup<IgnoredPragmas>;
 def warn_pragma_debug_missing_argument : Warning<
   "missing argument to debug command '%0'">, InGroup<IgnoredPragmas>;
+def warn_pragma_debug_unexpected_argument : Warning<
+  "unexpected argument to debug command">, InGroup<IgnoredPragmas>;
 def warn_pragma_debug_unknown_module : Warning<
   "unknown module '%0'">, InGroup<IgnoredPragmas>;
 // #pragma module
@@ -688,7 +704,7 @@ def ext_pp_bad_paste_ms : ExtWarn<
 def err_pp_operator_used_as_macro_name : Error<
   "C++ operator %0 (aka %1) used as a macro name">;
 def ext_pp_operator_used_as_macro_name : Extension<
-  err_pp_operator_used_as_macro_name.Text>, InGroup<MicrosoftCppMacro>;
+  err_pp_operator_used_as_macro_name.Summary>, InGroup<MicrosoftCppMacro>;
 def err_pp_illegal_floating_literal : Error<
   "floating point literal in preprocessor expression">;
 def err_pp_line_requires_integer : Error<
@@ -851,9 +867,9 @@ def warn_framework_include_private_from_public : Warning<
   "public framework header includes private framework header '%0'"
   >, InGroup<FrameworkIncludePrivateFromPublic>;
 
-def warn_auto_module_import : Warning<
+def remark_pp_include_directive_modular_translation : Remark<
   "treating #%select{include|import|include_next|__include_macros}0 as an "
-  "import of module '%1'">, InGroup<AutoImport>, DefaultIgnore;
+  "import of module '%1'">, InGroup<ModuleIncludeDirectiveTranslation>;
 def note_implicit_top_level_module_import_here : Note<
   "submodule of top-level module '%0' implicitly imported here">;
 def warn_uncovered_module_header : Warning<

@@ -14,14 +14,14 @@
 #include "gtest/gtest.h"
 
 #include <array>
-
+#include <utility>
 
 using namespace llvm;
 
-static_assert(std::is_trivially_copyable<Optional<int>>::value,
+static_assert(std::is_trivially_copyable_v<Optional<int>>,
               "trivially copyable");
 
-static_assert(std::is_trivially_copyable<Optional<std::array<int, 3>>>::value,
+static_assert(std::is_trivially_copyable_v<Optional<std::array<int, 3>>>,
               "trivially copyable");
 
 void OptionalWorksInConstexpr() {
@@ -70,9 +70,8 @@ unsigned NonDefaultConstructible::CopyConstructions = 0;
 unsigned NonDefaultConstructible::Destructions = 0;
 unsigned NonDefaultConstructible::CopyAssignments = 0;
 
-static_assert(
-    !std::is_trivially_copyable<Optional<NonDefaultConstructible>>::value,
-    "not trivially copyable");
+static_assert(!std::is_trivially_copyable_v<Optional<NonDefaultConstructible>>,
+              "not trivially copyable");
 
 TEST(OptionalTest, NonDefaultConstructibleTest) {
   Optional<NonDefaultConstructible> O;
@@ -201,7 +200,7 @@ TEST(OptionalTest, NullCopyConstructionTest) {
 
 TEST(OptionalTest, InPlaceConstructionNonDefaultConstructibleTest) {
   NonDefaultConstructible::ResetCounts();
-  { Optional<NonDefaultConstructible> A{in_place, 1}; }
+  { Optional<NonDefaultConstructible> A{std::in_place, 1}; }
   EXPECT_EQ(0u, NonDefaultConstructible::CopyConstructions);
   EXPECT_EQ(0u, NonDefaultConstructible::CopyAssignments);
   EXPECT_EQ(1u, NonDefaultConstructible::Destructions);
@@ -210,11 +209,9 @@ TEST(OptionalTest, InPlaceConstructionNonDefaultConstructibleTest) {
 TEST(OptionalTest, GetValueOr) {
   Optional<int> A;
   EXPECT_EQ(42, A.value_or(42));
-  EXPECT_EQ(42, A.getValueOr(42));
 
   A = 5;
   EXPECT_EQ(5, A.value_or(42));
-  EXPECT_EQ(5, A.getValueOr(42));
 }
 
 struct MultiArgConstructor {
@@ -243,13 +240,13 @@ struct MultiArgConstructor {
 };
 unsigned MultiArgConstructor::Destructions = 0;
 
-static_assert(!std::is_trivially_copyable<Optional<MultiArgConstructor>>::value,
+static_assert(!std::is_trivially_copyable_v<Optional<MultiArgConstructor>>,
               "not trivially copyable");
 
 TEST(OptionalTest, Emplace) {
   MultiArgConstructor::ResetCounts();
   Optional<MultiArgConstructor> A;
-  
+
   A.emplace(1, 2);
   EXPECT_TRUE(A.has_value());
   EXPECT_TRUE(A.has_value());
@@ -268,12 +265,12 @@ TEST(OptionalTest, Emplace) {
 TEST(OptionalTest, InPlaceConstructionMultiArgConstructorTest) {
   MultiArgConstructor::ResetCounts();
   {
-    Optional<MultiArgConstructor> A{in_place, 1, 2};
+    Optional<MultiArgConstructor> A{std::in_place, 1, 2};
     EXPECT_TRUE(A.has_value());
     EXPECT_TRUE(A.has_value());
     EXPECT_EQ(1, A->x);
     EXPECT_EQ(2, A->y);
-    Optional<MultiArgConstructor> B{in_place, 5, false};
+    Optional<MultiArgConstructor> B{std::in_place, 5, false};
     EXPECT_TRUE(B.has_value());
     EXPECT_TRUE(B.has_value());
     EXPECT_EQ(5, B->x);
@@ -286,7 +283,7 @@ TEST(OptionalTest, InPlaceConstructionMultiArgConstructorTest) {
 TEST(OptionalTest, InPlaceConstructionAndEmplaceEquivalentTest) {
   MultiArgConstructor::ResetCounts();
   {
-    Optional<MultiArgConstructor> A{in_place, 1, 2};
+    Optional<MultiArgConstructor> A{std::in_place, 1, 2};
     Optional<MultiArgConstructor> B;
     B.emplace(1, 2);
     EXPECT_EQ(0u, MultiArgConstructor::Destructions);
@@ -325,7 +322,7 @@ unsigned MoveOnly::MoveConstructions = 0;
 unsigned MoveOnly::Destructions = 0;
 unsigned MoveOnly::MoveAssignments = 0;
 
-static_assert(!std::is_trivially_copyable<Optional<MoveOnly>>::value,
+static_assert(!std::is_trivially_copyable_v<Optional<MoveOnly>>,
               "not trivially copyable");
 
 TEST(OptionalTest, MoveOnlyNull) {
@@ -429,7 +426,7 @@ private:
 unsigned Immovable::Constructions = 0;
 unsigned Immovable::Destructions = 0;
 
-static_assert(!std::is_trivially_copyable<Optional<Immovable>>::value,
+static_assert(!std::is_trivially_copyable_v<Optional<Immovable>>,
               "not trivially copyable");
 
 TEST(OptionalTest, ImmovableEmplace) {
@@ -444,7 +441,7 @@ TEST(OptionalTest, ImmovableEmplace) {
 
 TEST(OptionalTest, ImmovableInPlaceConstruction) {
   Immovable::ResetCounts();
-  Optional<Immovable> A{in_place, 4};
+  Optional<Immovable> A{std::in_place, 4};
   EXPECT_TRUE((bool)A);
   EXPECT_EQ(4, A->val);
   EXPECT_EQ(1u, Immovable::Constructions);
@@ -567,7 +564,7 @@ TEST(OptionalTest, DeletedMoveConstructor) {
   NonTMove1 = std::move(NonTMove2);
 
   static_assert(
-      std::is_trivially_copyable<NoTMoveOptT>::value,
+      std::is_trivially_copyable_v<NoTMoveOptT>,
       "Expect Optional<NoTMove> to still use the trivial specialization "
       "of OptionalStorage despite the deleted move constructor / assignment.");
 }
@@ -605,21 +602,38 @@ TEST(OptionalTest, MoveValueOr) {
   EXPECT_EQ(2u, MoveOnly::Destructions);
 }
 
-TEST(OptionalTest, MoveGetValueOr) {
+TEST(OptionalTest, Transform) {
+  Optional<int> A;
+
+  Optional<int> B = A.transform([&](int N) { return N + 1; });
+  EXPECT_FALSE(B.has_value());
+
+  A = 3;
+  Optional<int> C = A.transform([&](int N) { return N + 1; });
+  EXPECT_TRUE(C.has_value());
+  EXPECT_EQ(4, C.value());
+}
+
+TEST(OptionalTest, MoveTransform) {
   Optional<MoveOnly> A;
 
   MoveOnly::ResetCounts();
-  EXPECT_EQ(42, std::move(A).getValueOr(MoveOnly(42)).val);
-  EXPECT_EQ(1u, MoveOnly::MoveConstructions);
+  Optional<int> B =
+      std::move(A).transform([&](const MoveOnly &M) { return M.val + 2; });
+  EXPECT_FALSE(B.has_value());
+  EXPECT_EQ(0u, MoveOnly::MoveConstructions);
   EXPECT_EQ(0u, MoveOnly::MoveAssignments);
-  EXPECT_EQ(2u, MoveOnly::Destructions);
+  EXPECT_EQ(0u, MoveOnly::Destructions);
 
   A = MoveOnly(5);
   MoveOnly::ResetCounts();
-  EXPECT_EQ(5, std::move(A).getValueOr(MoveOnly(42)).val);
-  EXPECT_EQ(1u, MoveOnly::MoveConstructions);
+  Optional<int> C =
+      std::move(A).transform([&](const MoveOnly &M) { return M.val + 2; });
+  EXPECT_TRUE(C.has_value());
+  EXPECT_EQ(7, C.value());
+  EXPECT_EQ(0u, MoveOnly::MoveConstructions);
   EXPECT_EQ(0u, MoveOnly::MoveAssignments);
-  EXPECT_EQ(2u, MoveOnly::Destructions);
+  EXPECT_EQ(0u, MoveOnly::Destructions);
 }
 
 struct EqualTo {
@@ -666,12 +680,12 @@ void CheckRelation(const Optional<T> &Lhs, const Optional<T> &Rhs,
   if (Lhs)
     EXPECT_EQ(Expected, OperatorT::apply(*Lhs, Rhs));
   else
-    EXPECT_EQ(Expected, OperatorT::apply(None, Rhs));
+    EXPECT_EQ(Expected, OperatorT::apply(std::nullopt, Rhs));
 
   if (Rhs)
     EXPECT_EQ(Expected, OperatorT::apply(Lhs, *Rhs));
   else
-    EXPECT_EQ(Expected, OperatorT::apply(Lhs, None));
+    EXPECT_EQ(Expected, OperatorT::apply(Lhs, std::nullopt));
 }
 
 struct EqualityMock {};
@@ -786,7 +800,7 @@ TEST(OptionalTest, StreamOperator) {
   };
   EXPECT_EQ("ComparableAndStreamable",
             to_string(ComparableAndStreamable::get()));
-  EXPECT_EQ("None", to_string(None));
+  EXPECT_EQ("None", to_string(std::nullopt));
 }
 
 struct Comparable {
@@ -838,5 +852,14 @@ TEST(OptionalTest, GCCIsTriviallyMoveConstructibleCompat) {
   Optional<NotTriviallyCopyable> V;
   EXPECT_FALSE(V);
 }
+
+TEST(OptionalTest, DeductionGuide) {
+  Optional V = MoveOnly(1);
+  EXPECT_TRUE(V);
+  EXPECT_EQ(V->val, 1);
+}
+
+static_assert(
+    std::is_same_v<Optional<MoveOnly>, decltype(Optional(MoveOnly(1)))>);
 
 } // end anonymous namespace

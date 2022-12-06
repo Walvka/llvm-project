@@ -36,11 +36,11 @@ using namespace lldb_private;
 
 ThreadPlanTracer::ThreadPlanTracer(Thread &thread, lldb::StreamSP &stream_sp)
     : m_process(*thread.GetProcess().get()), m_tid(thread.GetID()),
-      m_enabled(false), m_stream_sp(stream_sp) {}
+      m_enabled(false), m_stream_sp(stream_sp), m_thread(nullptr) {}
 
 ThreadPlanTracer::ThreadPlanTracer(Thread &thread)
     : m_process(*thread.GetProcess().get()), m_tid(thread.GetID()),
-      m_enabled(false), m_stream_sp() {}
+      m_enabled(false), m_stream_sp(), m_thread(nullptr) {}
 
 Stream *ThreadPlanTracer::GetLogStream() {
   if (m_stream_sp)
@@ -110,10 +110,10 @@ TypeFromUser ThreadPlanAssemblyTracer::GetIntPointerType() {
         LLDB_LOG_ERROR(GetLog(LLDBLog::Types), std::move(err),
                        "Unable to get integer pointer type from TypeSystem");
       } else {
-        m_intptr_type = TypeFromUser(
-            type_system_or_err->GetBuiltinTypeForEncodingAndBitSize(
-                eEncodingUint,
-                target_sp->GetArchitecture().GetAddressByteSize() * 8));
+        if (auto ts = *type_system_or_err)
+          m_intptr_type = TypeFromUser(ts->GetBuiltinTypeForEncodingAndBitSize(
+              eEncodingUint,
+              target_sp->GetArchitecture().GetAddressByteSize() * 8));
       }
     }
   }

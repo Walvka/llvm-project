@@ -138,13 +138,11 @@ IncrementalCompilerBuilder::create(std::vector<const char *> &ClangArgv) {
   // specified. By prepending we allow users to override the default
   // action and use other actions in incremental mode.
   // FIXME: Print proper driver diagnostics if the driver flags are wrong.
-  ClangArgv.insert(ClangArgv.begin() + 1, "-c");
-
-  if (!llvm::is_contained(ClangArgv, " -x")) {
-    // We do C++ by default; append right after argv[0] if no "-x" given
-    ClangArgv.push_back("-x");
-    ClangArgv.push_back("c++");
-  }
+  // We do C++ by default; append right after argv[0] if no "-x" given
+  ClangArgv.insert(ClangArgv.end(), "-xc++");
+  ClangArgv.insert(ClangArgv.end(), "-Xclang");
+  ClangArgv.insert(ClangArgv.end(), "-fincremental-extensions");
+  ClangArgv.insert(ClangArgv.end(), "-c");
 
   // Put a dummy C++ file on to ensure there's at least one compile job for the
   // driver to construct.
@@ -183,7 +181,14 @@ Interpreter::Interpreter(std::unique_ptr<CompilerInstance> CI,
                                                    *TSCtx->getContext(), Err);
 }
 
-Interpreter::~Interpreter() {}
+Interpreter::~Interpreter() {
+  if (IncrExecutor) {
+    if (llvm::Error Err = IncrExecutor->cleanUp())
+      llvm::report_fatal_error(
+          llvm::Twine("Failed to clean up IncrementalExecutor: ") +
+          toString(std::move(Err)));
+  }
+}
 
 llvm::Expected<std::unique_ptr<Interpreter>>
 Interpreter::create(std::unique_ptr<CompilerInstance> CI) {
