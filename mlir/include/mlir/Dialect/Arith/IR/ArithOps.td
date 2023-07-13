@@ -46,12 +46,6 @@ class Arith_BinaryOp<string mnemonic, list<Trait> traits = []> :
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
 }
 
-// Base class for ternary arithmetic operations.
-class Arith_TernaryOp<string mnemonic, list<Trait> traits = []> :
-    Arith_ArithOp<mnemonic, traits # [Pure]> {
-  let assemblyFormat = "$a `,` $b `,` $c attr-dict `:` type($result)";
-}
-
 // Base class for integer binary operations.
 class Arith_IntBinaryOp<string mnemonic, list<Trait> traits = []> :
     Arith_BinaryOp<mnemonic, traits #
@@ -69,7 +63,8 @@ class Arith_FloatUnaryOp<string mnemonic, list<Trait> traits = []> :
       !listconcat([DeclareOpInterfaceMethods<ArithFastMathInterface>],
                   traits)>,
     Arguments<(ins FloatLike:$operand,
-      DefaultValuedAttr<Arith_FastMathAttr, "FastMathFlags::none">:$fastmath)>,
+      DefaultValuedAttr<
+        Arith_FastMathAttr, "::mlir::arith::FastMathFlags::none">:$fastmath)>,
     Results<(outs FloatLike:$result)> {
   let assemblyFormat = [{ $operand (`fastmath` `` $fastmath^)?
                           attr-dict `:` type($result) }];
@@ -81,7 +76,8 @@ class Arith_FloatBinaryOp<string mnemonic, list<Trait> traits = []> :
       !listconcat([Pure, DeclareOpInterfaceMethods<ArithFastMathInterface>],
                   traits)>,
     Arguments<(ins FloatLike:$lhs, FloatLike:$rhs,
-      DefaultValuedAttr<Arith_FastMathAttr, "FastMathFlags::none">:$fastmath)>,
+      DefaultValuedAttr<
+        Arith_FastMathAttr, "::mlir::arith::FastMathFlags::none">:$fastmath)>,
     Results<(outs FloatLike:$result)> {
   let assemblyFormat = [{ $lhs `,` $rhs (`fastmath` `` $fastmath^)?
                           attr-dict `:` type($result) }];
@@ -102,7 +98,7 @@ class Arith_CastOp<string mnemonic, TypeConstraint From, TypeConstraint To,
 // excluding indices: signless integers, vectors or tensors thereof.
 def SignlessFixedWidthIntegerLike : TypeConstraint<Or<[
         AnySignlessInteger.predicate,
-        VectorOf<[AnySignlessInteger]>.predicate,
+        VectorOfAnyRankOf<[AnySignlessInteger]>.predicate,
         TensorOf<[AnySignlessInteger]>.predicate]>,
     "signless-fixed-width-integer-like">;
 
@@ -176,15 +172,15 @@ def Arith_ConstantOp : Op<Arith_Dialect, "constant",
   // splitting the Standard dialect.
   let results = (outs /*SignlessIntegerOrFloatLike*/AnyType:$result);
 
-  let builders = [
-    OpBuilder<(ins "Attribute":$value, "Type":$type),
-    [{ build($_builder, $_state, type, value); }]>,
-  ];
-
   let extraClassDeclaration = [{
     /// Whether the constant op can be constructed with a particular value and
     /// type.
     static bool isBuildableWith(Attribute value, Type type);
+
+    /// Build the constant op with `value` and `type` if possible, otherwise
+    /// returns null.
+    static ConstantOp materialize(OpBuilder &builder, Attribute value,
+                                  Type type, Location loc);
   }];
 
   let hasFolder = 1;
@@ -265,9 +261,10 @@ def Arith_AddUIExtendedOp : Arith_Op<"addui_extended", [Pure, Commutative,
   ];
 
   let hasFolder = 1;
+  let hasCanonicalizer = 1;
 
   let extraClassDeclaration = [{
-    ::llvm::Optional<::llvm::SmallVector<int64_t, 4>> getShapeForUnroll();
+    std::optional<SmallVector<int64_t, 4>> getShapeForUnroll();
   }];
 }
 
@@ -288,6 +285,92 @@ def Arith_SubIOp : Arith_TotalIntBinaryOp<"subi"> {
 def Arith_MulIOp : Arith_TotalIntBinaryOp<"muli", [Commutative]> {
   let summary = "integer multiplication operation";
   let hasFolder = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// MulSIExtendedOp
+//===----------------------------------------------------------------------===//
+
+def Arith_MulSIExtendedOp : Arith_Op<"mulsi_extended", [Pure, Commutative,
+    AllTypesMatch<["lhs", "rhs", "low", "high"]>]> {
+  let summary = [{
+    extended signed integer multiplication operation
+  }];
+
+  let description = [{
+    Performs (2*N)-bit multiplication on sign-extended operands. Returns two
+    N-bit results: the low and the high halves of the product. The low half has
+    the same value as the result of regular multiplication `arith.muli` with
+    the same operands.
+
+    Example:
+
+    ```mlir
+    // Scalar multiplication.
+    %low, %high = arith.mulsi_extended %a, %b : i32
+
+    // Vector element-wise multiplication.
+    %c:2 = arith.mulsi_extended %d, %e : vector<4xi32>
+
+    // Tensor element-wise multiplication.
+    %x:2 = arith.mulsi_extended %y, %z : tensor<4x?xi8>
+    ```
+  }];
+
+  let arguments = (ins SignlessIntegerLike:$lhs, SignlessIntegerLike:$rhs);
+  let results = (outs SignlessIntegerLike:$low, SignlessIntegerLike:$high);
+
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs)";
+
+  let hasFolder = 1;
+  let hasCanonicalizer = 1;
+
+  let extraClassDeclaration = [{
+    std::optional<SmallVector<int64_t, 4>> getShapeForUnroll();
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// MulUIExtendedOp
+//===----------------------------------------------------------------------===//
+
+def Arith_MulUIExtendedOp : Arith_Op<"mului_extended", [Pure, Commutative,
+    AllTypesMatch<["lhs", "rhs", "low", "high"]>]> {
+  let summary = [{
+    extended unsigned integer multiplication operation
+  }];
+
+  let description = [{
+    Performs (2*N)-bit multiplication on zero-extended operands. Returns two
+    N-bit results: the low and the high halves of the product. The low half has
+    the same value as the result of regular multiplication `arith.muli` with
+    the same operands.
+
+    Example:
+
+    ```mlir
+    // Scalar multiplication.
+    %low, %high = arith.mului_extended %a, %b : i32
+
+    // Vector element-wise multiplication.
+    %c:2 = arith.mului_extended %d, %e : vector<4xi32>
+
+    // Tensor element-wise multiplication.
+    %x:2 = arith.mului_extended %y, %z : tensor<4x?xi8>
+    ```
+  }];
+
+  let arguments = (ins SignlessIntegerLike:$lhs, SignlessIntegerLike:$rhs);
+  let results = (outs SignlessIntegerLike:$low, SignlessIntegerLike:$high);
+
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs)";
+
+  let hasFolder = 1;
+  let hasCanonicalizer = 1;
+
+  let extraClassDeclaration = [{
+    std::optional<SmallVector<int64_t, 4>> getShapeForUnroll();
+  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -958,6 +1041,7 @@ def Arith_ExtFOp : Arith_FToFCastOp<"extf"> {
     When operating on vectors, casts elementwise.
   }];
   let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -984,6 +1068,7 @@ def Arith_TruncIOp : Arith_IToICastOp<"trunci"> {
   }];
 
   let hasFolder = 1;
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 
@@ -1217,13 +1302,6 @@ def Arith_CmpIOp
                        SignlessIntegerLikeOfAnyRank:$lhs,
                        SignlessIntegerLikeOfAnyRank:$rhs);
 
-  let builders = [
-    OpBuilder<(ins "CmpIPredicate":$predicate, "Value":$lhs, "Value":$rhs), [{
-      build($_builder, $_state, ::getI1SameShape(lhs.getType()),
-            predicate, lhs, rhs);
-    }]>
-  ];
-
   let extraClassDeclaration = [{
     static arith::CmpIPredicate getPredicateByName(StringRef name);
   }];
@@ -1268,13 +1346,6 @@ def Arith_CmpFOp : Arith_CompareOp<"cmpf"> {
                        FloatLike:$lhs,
                        FloatLike:$rhs);
 
-  let builders = [
-    OpBuilder<(ins "CmpFPredicate":$predicate, "Value":$lhs, "Value":$rhs), [{
-      build($_builder, $_state, ::getI1SameShape(lhs.getType()),
-            predicate, lhs, rhs);
-    }]>
-  ];
-
   let extraClassDeclaration = [{
     static arith::CmpFPredicate getPredicateByName(StringRef name);
   }];
@@ -1289,6 +1360,7 @@ def Arith_CmpFOp : Arith_CompareOp<"cmpf"> {
 
 def SelectOp : Arith_Op<"select", [Pure,
     AllTypesMatch<["true_value", "false_value", "result"]>,
+    ScalarConditionOrMatchingShape<["condition", "result"]>,
     DeclareOpInterfaceMethods<InferIntRangeInterface>,
   ] # ElementwiseMappable.traits> {
   let summary = "select operation";

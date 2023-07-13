@@ -29,6 +29,7 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/Transforms/Utils/SanitizerStats.h"
+#include <optional>
 
 using namespace clang;
 using namespace CodeGen;
@@ -138,7 +139,7 @@ Address CodeGenFunction::LoadCXXThisAddress() {
   }
 
   llvm::Type *Ty = ConvertType(MD->getThisType()->getPointeeType());
-  return Address(LoadCXXThis(), Ty, CXXThisAlignment);
+  return Address(LoadCXXThis(), Ty, CXXThisAlignment, KnownNonNull);
 }
 
 /// Emit the address of a field using a member data pointer.
@@ -235,12 +236,10 @@ CodeGenFunction::GetAddressOfDirectBaseInCompleteClass(Address This,
   // TODO: for complete types, this should be possible with a GEP.
   Address V = This;
   if (!Offset.isZero()) {
-    V = Builder.CreateElementBitCast(V, Int8Ty);
+    V = V.withElementType(Int8Ty);
     V = Builder.CreateConstInBoundsByteGEP(V, Offset);
   }
-  V = Builder.CreateElementBitCast(V, ConvertType(Base));
-
-  return V;
+  return V.withElementType(ConvertType(Base));
 }
 
 static Address
@@ -271,8 +270,6 @@ ApplyNonVirtualAndVirtualOffset(CodeGenFunction &CGF, Address addr,
 
   // Apply the base offset.
   llvm::Value *ptr = addr.getPointer();
-  unsigned AddrSpace = ptr->getType()->getPointerAddressSpace();
-  ptr = CGF.Builder.CreateBitCast(ptr, CGF.Int8Ty->getPointerTo(AddrSpace));
   ptr = CGF.Builder.CreateInBoundsGEP(CGF.Int8Ty, ptr, baseOffset, "add.ptr");
 
   // If we have a virtual component, the alignment of the result will
@@ -328,8 +325,8 @@ Address CodeGenFunction::GetAddressOfBaseClass(
 
   // Get the base pointer type.
   llvm::Type *BaseValueTy = ConvertType((PathEnd[-1])->getType());
-  llvm::Type *BasePtrTy =
-      BaseValueTy->getPointerTo(Value.getType()->getPointerAddressSpace());
+  llvm::Type *PtrTy = llvm::PointerType::get(
+      CGM.getLLVMContext(), Value.getType()->getPointerAddressSpace());
 
   QualType DerivedTy = getContext().getRecordType(Derived);
   CharUnits DerivedAlign = CGM.getClassPointerAlignment(Derived);
@@ -343,7 +340,7 @@ Address CodeGenFunction::GetAddressOfBaseClass(
       EmitTypeCheck(TCK_Upcast, Loc, Value.getPointer(),
                     DerivedTy, DerivedAlign, SkippedChecks);
     }
-    return Builder.CreateElementBitCast(Value, BaseValueTy);
+    return Value.withElementType(BaseValueTy);
   }
 
   llvm::BasicBlock *origBB = nullptr;
@@ -380,7 +377,7 @@ Address CodeGenFunction::GetAddressOfBaseClass(
                                           VirtualOffset, Derived, VBase);
 
   // Cast to the destination type.
-  Value = Builder.CreateElementBitCast(Value, BaseValueTy);
+  Value = Value.withElementType(BaseValueTy);
 
   // Build a phi if we needed a null check.
   if (NullCheckValue) {
@@ -388,10 +385,10 @@ Address CodeGenFunction::GetAddressOfBaseClass(
     Builder.CreateBr(endBB);
     EmitBlock(endBB);
 
-    llvm::PHINode *PHI = Builder.CreatePHI(BasePtrTy, 2, "cast.result");
+    llvm::PHINode *PHI = Builder.CreatePHI(PtrTy, 2, "cast.result");
     PHI->addIncoming(Value.getPointer(), notNullBB);
-    PHI->addIncoming(llvm::Constant::getNullValue(BasePtrTy), origBB);
-    Value = Value.withPointer(PHI);
+    PHI->addIncoming(llvm::Constant::getNullValue(PtrTy), origBB);
+    Value = Value.withPointer(PHI, NotKnownNonNull);
   }
 
   return Value;
@@ -409,14 +406,15 @@ CodeGenFunction::GetAddressOfDerivedClass(Address BaseAddr,
     getContext().getCanonicalType(getContext().getTagDeclType(Derived));
   unsigned AddrSpace = BaseAddr.getAddressSpace();
   llvm::Type *DerivedValueTy = ConvertType(DerivedTy);
-  llvm::Type *DerivedPtrTy = DerivedValueTy->getPointerTo(AddrSpace);
+  llvm::Type *DerivedPtrTy =
+      llvm::PointerType::get(getLLVMContext(), AddrSpace);
 
   llvm::Value *NonVirtualOffset =
     CGM.GetNonVirtualBaseClassOffset(Derived, PathBegin, PathEnd);
 
   if (!NonVirtualOffset) {
     // No offset, we can just cast back.
-    return Builder.CreateElementBitCast(BaseAddr, DerivedValueTy);
+    return BaseAddr.withElementType(DerivedValueTy);
   }
 
   llvm::BasicBlock *CastNull = nullptr;
@@ -997,8 +995,8 @@ namespace {
 
   private:
     void emitMemcpyIR(Address DestPtr, Address SrcPtr, CharUnits Size) {
-      DestPtr = CGF.Builder.CreateElementBitCast(DestPtr, CGF.Int8Ty);
-      SrcPtr = CGF.Builder.CreateElementBitCast(SrcPtr, CGF.Int8Ty);
+      DestPtr = DestPtr.withElementType(CGF.Int8Ty);
+      SrcPtr = SrcPtr.withElementType(CGF.Int8Ty);
       CGF.Builder.CreateMemCpy(DestPtr, SrcPtr, Size.getQuantity());
     }
 
@@ -1652,7 +1650,7 @@ namespace {
   class DeclAsInlineDebugLocation {
     CGDebugInfo *DI;
     llvm::MDNode *InlinedAt;
-    llvm::Optional<ApplyDebugLocation> Location;
+    std::optional<ApplyDebugLocation> Location;
 
   public:
     DeclAsInlineDebugLocation(CodeGenFunction &CGF, const NamedDecl &Decl)
@@ -1674,7 +1672,7 @@ namespace {
 
   static void EmitSanitizerDtorCallback(
       CodeGenFunction &CGF, StringRef Name, llvm::Value *Ptr,
-      llvm::Optional<CharUnits::QuantityType> PoisonSize = {}) {
+      std::optional<CharUnits::QuantityType> PoisonSize = {}) {
     CodeGenFunction::SanitizerScope SanScope(&CGF);
     // Pass in void pointer and size of region as arguments to runtime
     // function
@@ -1808,7 +1806,7 @@ namespace {
    ASTContext &Context;
    EHScopeStack &EHStack;
    const CXXDestructorDecl *DD;
-   llvm::Optional<unsigned> StartIndex;
+   std::optional<unsigned> StartIndex;
 
  public:
    SanitizeDtorCleanupBuilder(ASTContext &Context, EHScopeStack &EHStack,
@@ -1822,15 +1820,15 @@ namespace {
        if (!StartIndex)
          StartIndex = FieldIndex;
      } else if (StartIndex) {
-       EHStack.pushCleanup<SanitizeDtorFieldRange>(
-           NormalAndEHCleanup, DD, StartIndex.value(), FieldIndex);
+       EHStack.pushCleanup<SanitizeDtorFieldRange>(NormalAndEHCleanup, DD,
+                                                   *StartIndex, FieldIndex);
        StartIndex = std::nullopt;
      }
    }
    void End() {
      if (StartIndex)
        EHStack.pushCleanup<SanitizeDtorFieldRange>(NormalAndEHCleanup, DD,
-                                                   StartIndex.value(), -1);
+                                                   *StartIndex, -1);
    }
  };
 } // end anonymous namespace
@@ -2131,8 +2129,8 @@ void CodeGenFunction::EmitCXXConstructorCall(const CXXConstructorDecl *D,
 
   if (SlotAS != ThisAS) {
     unsigned TargetThisAS = getContext().getTargetAddressSpace(ThisAS);
-    llvm::Type *NewType = llvm::PointerType::getWithSamePointeeType(
-        This.getType(), TargetThisAS);
+    llvm::Type *NewType =
+        llvm::PointerType::get(getLLVMContext(), TargetThisAS);
     ThisPtr = getTargetHooks().performAddrSpaceCast(*this, This.getPointer(),
                                                     ThisAS, SlotAS, NewType);
   }
@@ -2578,18 +2576,13 @@ void CodeGenFunction::InitializeVTablePointer(const VPtr &Vptr) {
   // Finally, store the address point. Use the same LLVM types as the field to
   // support optimization.
   unsigned GlobalsAS = CGM.getDataLayout().getDefaultGlobalsAddressSpace();
-  unsigned ProgAS = CGM.getDataLayout().getProgramAddressSpace();
-  llvm::Type *VTablePtrTy =
-      llvm::FunctionType::get(CGM.Int32Ty, /*isVarArg=*/true)
-          ->getPointerTo(ProgAS)
-          ->getPointerTo(GlobalsAS);
+  llvm::Type *PtrTy = llvm::PointerType::get(CGM.getLLVMContext(), GlobalsAS);
   // vtable field is derived from `this` pointer, therefore they should be in
   // the same addr space. Note that this might not be LLVM address space 0.
-  VTableField = Builder.CreateElementBitCast(VTableField, VTablePtrTy);
-  VTableAddressPoint = Builder.CreateBitCast(VTableAddressPoint, VTablePtrTy);
+  VTableField = VTableField.withElementType(PtrTy);
 
   llvm::StoreInst *Store = Builder.CreateStore(VTableAddressPoint, VTableField);
-  TBAAAccessInfo TBAAInfo = CGM.getTBAAVTablePtrAccessInfo(VTablePtrTy);
+  TBAAAccessInfo TBAAInfo = CGM.getTBAAVTablePtrAccessInfo(PtrTy);
   CGM.DecorateInstructionWithTBAA(Store, TBAAInfo);
   if (CGM.getCodeGenOpts().OptimizationLevel > 0 &&
       CGM.getCodeGenOpts().StrictVTablePointers)
@@ -2682,7 +2675,7 @@ void CodeGenFunction::InitializeVTablePointers(const CXXRecordDecl *RD) {
 llvm::Value *CodeGenFunction::GetVTablePtr(Address This,
                                            llvm::Type *VTableTy,
                                            const CXXRecordDecl *RD) {
-  Address VTablePtrSrc = Builder.CreateElementBitCast(This, VTableTy);
+  Address VTablePtrSrc = This.withElementType(VTableTy);
   llvm::Instruction *VTable = Builder.CreateLoad(VTablePtrSrc, "vtable");
   TBAAAccessInfo TBAAInfo = CGM.getTBAAVTablePtrAccessInfo(VTableTy);
   CGM.DecorateInstructionWithTBAA(VTable, TBAAInfo);

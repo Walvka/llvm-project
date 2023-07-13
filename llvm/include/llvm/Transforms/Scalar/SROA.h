@@ -21,12 +21,14 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/ValueHandle.h"
+#include <variant>
 #include <vector>
 
 namespace llvm {
 
 class AllocaInst;
 class LoadInst;
+class StoreInst;
 class AssumptionCache;
 class DominatorTree;
 class DomTreeUpdater;
@@ -38,7 +40,7 @@ class Use;
 
 /// A private "module" namespace for types and utilities used by SROA. These
 /// are implementation details and should not be used by clients.
-namespace sroa LLVM_LIBRARY_VISIBILITY {
+namespace LLVM_LIBRARY_VISIBILITY sroa {
 
 class AllocaSliceRewriter;
 class AllocaSlices;
@@ -46,7 +48,7 @@ class Partition;
 class SROALegacyPass;
 
 class SelectHandSpeculativity {
-  unsigned char Storage = 0;
+  unsigned char Storage = 0; // None are speculatable by default.
   using TrueVal = Bitfield::Element<bool, 0, 1>;  // Low 0'th bit.
   using FalseVal = Bitfield::Element<bool, 1, 1>; // Low 1'th bit.
 public:
@@ -64,7 +66,10 @@ static_assert(sizeof(SelectHandSpeculativity) == sizeof(unsigned char));
 
 using PossiblySpeculatableLoad =
     PointerIntPair<LoadInst *, 2, sroa::SelectHandSpeculativity>;
-using PossiblySpeculatableLoads = SmallVector<PossiblySpeculatableLoad, 2>;
+using UnspeculatableStore = StoreInst *;
+using RewriteableMemOp =
+    std::variant<PossiblySpeculatableLoad, UnspeculatableStore>;
+using RewriteableMemOps = SmallVector<RewriteableMemOp, 2>;
 
 } // end namespace sroa
 
@@ -101,7 +106,7 @@ class SROAPass : public PassInfoMixin<SROAPass> {
   /// directly promoted. Finally, each time we rewrite a use of an alloca other
   /// the one being actively rewritten, we add it back onto the list if not
   /// already present to ensure it is re-visited.
-  SetVector<AllocaInst *, SmallVector<AllocaInst *, 16>> Worklist;
+  SmallSetVector<AllocaInst *, 16> Worklist;
 
   /// A collection of instructions to delete.
   /// We try to batch deletions to simplify code and make things a bit more
@@ -116,7 +121,7 @@ class SROAPass : public PassInfoMixin<SROAPass> {
   ///
   /// Note that we have to be very careful to clear allocas out of this list in
   /// the event they are deleted.
-  SetVector<AllocaInst *, SmallVector<AllocaInst *, 16>> PostPromotionWorklist;
+  SmallSetVector<AllocaInst *, 16> PostPromotionWorklist;
 
   /// A collection of alloca instructions we can directly promote.
   std::vector<AllocaInst *> PromotableAllocas;
@@ -126,12 +131,11 @@ class SROAPass : public PassInfoMixin<SROAPass> {
   /// All of these PHIs have been checked for the safety of speculation and by
   /// being speculated will allow promoting allocas currently in the promotable
   /// queue.
-  SetVector<PHINode *, SmallVector<PHINode *, 8>> SpeculatablePHIs;
+  SmallSetVector<PHINode *, 8> SpeculatablePHIs;
 
   /// A worklist of select instructions to rewrite prior to promoting
   /// allocas.
-  SmallMapVector<SelectInst *, sroa::PossiblySpeculatableLoads, 8>
-      SelectsToRewrite;
+  SmallMapVector<SelectInst *, sroa::RewriteableMemOps, 8> SelectsToRewrite;
 
   /// Select instructions that use an alloca and are subsequently loaded can be
   /// rewritten to load both input pointers and then select between the result,
@@ -149,7 +153,7 @@ class SROAPass : public PassInfoMixin<SROAPass> {
   ///        or if we are allowed to perform CFG modifications.
   /// If found an intervening bitcast with a single use of the load,
   /// allow the promotion.
-  static std::optional<sroa::PossiblySpeculatableLoads>
+  static std::optional<sroa::RewriteableMemOps>
   isSafeSelectToSpeculate(SelectInst &SI, bool PreserveCFG);
 
 public:

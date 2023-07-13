@@ -35,7 +35,6 @@
 #include "llvm/Transforms/Scalar/ConstantHoisting.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -156,11 +155,6 @@ bool ConstantHoistingLegacyPass::runOnFunction(Function &Fn) {
                    Fn.getEntryBlock(),
                    &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI());
 
-  if (MadeChange) {
-    LLVM_DEBUG(dbgs() << "********** Function after Constant Hoisting: "
-                      << Fn.getName() << '\n');
-    LLVM_DEBUG(dbgs() << Fn);
-  }
   LLVM_DEBUG(dbgs() << "********** End Constant Hoisting **********\n");
 
   return MadeChange;
@@ -329,12 +323,8 @@ SetVector<Instruction *> ConstantHoistingPass::findConstantInsertionPoint(
 
   if (BFI) {
     findBestInsertionSet(*DT, *BFI, Entry, BBs);
-    for (auto *BB : BBs) {
-      BasicBlock::iterator InsertPt = BB->begin();
-      for (; isa<PHINode>(InsertPt) || InsertPt->isEHPad(); ++InsertPt)
-        ;
-      InsertPts.insert(&*InsertPt);
-    }
+    for (BasicBlock *BB : BBs)
+      InsertPts.insert(&*BB->getFirstInsertionPt());
     return InsertPts;
   }
 
@@ -411,8 +401,8 @@ void ConstantHoistingPass::collectConstantCandidates(
 
   // Get offset from the base GV.
   PointerType *GVPtrTy = cast<PointerType>(BaseGV->getType());
-  IntegerType *PtrIntTy = DL->getIntPtrType(*Ctx, GVPtrTy->getAddressSpace());
-  APInt Offset(DL->getTypeSizeInBits(PtrIntTy), /*val*/0, /*isSigned*/true);
+  IntegerType *OffsetTy = DL->getIndexType(*Ctx, GVPtrTy->getAddressSpace());
+  APInt Offset(DL->getTypeSizeInBits(OffsetTy), /*val*/ 0, /*isSigned*/ true);
   auto *GEPO = cast<GEPOperator>(ConstExpr);
 
   // TODO: If we have a mix of inbounds and non-inbounds GEPs, then basing a
@@ -433,7 +423,7 @@ void ConstantHoistingPass::collectConstantCandidates(
   // to be cheaper than compute it by <Base + Offset>, which can be lowered to
   // an ADD instruction or folded into Load/Store instruction.
   InstructionCost Cost =
-      TTI->getIntImmCostInst(Instruction::Add, 1, Offset, PtrIntTy,
+      TTI->getIntImmCostInst(Instruction::Add, 1, Offset, OffsetTy,
                              TargetTransformInfo::TCK_SizeAndLatency, Inst);
   ConstCandVecType &ExprCandVec = ConstGEPCandMap[BaseGV];
   ConstCandMapType::iterator Itr;
@@ -532,8 +522,9 @@ void ConstantHoistingPass::collectConstantCandidates(Function &Fn) {
 // bit widths (APInt Operator- does not like that). If the value cannot be
 // represented in uint64 we return an "empty" APInt. This is then interpreted
 // as the value is not in range.
-static Optional<APInt> calculateOffsetDiff(const APInt &V1, const APInt &V2) {
-  Optional<APInt> Res;
+static std::optional<APInt> calculateOffsetDiff(const APInt &V1,
+                                                const APInt &V2) {
+  std::optional<APInt> Res;
   unsigned BW = V1.getBitWidth() > V2.getBitWidth() ?
                 V1.getBitWidth() : V2.getBitWidth();
   uint64_t LimVal1 = V1.getLimitedValue();
@@ -605,14 +596,13 @@ ConstantHoistingPass::maximizeConstantsInRange(ConstCandVecType::iterator S,
       LLVM_DEBUG(dbgs() << "Cost: " << Cost << "\n");
 
       for (auto C2 = S; C2 != E; ++C2) {
-        Optional<APInt> Diff = calculateOffsetDiff(
-                                   C2->ConstInt->getValue(),
-                                   ConstCand->ConstInt->getValue());
+        std::optional<APInt> Diff = calculateOffsetDiff(
+            C2->ConstInt->getValue(), ConstCand->ConstInt->getValue());
         if (Diff) {
           const InstructionCost ImmCosts =
-              TTI->getIntImmCodeSizeCost(Opcode, OpndIdx, Diff.value(), Ty);
+              TTI->getIntImmCodeSizeCost(Opcode, OpndIdx, *Diff, Ty);
           Cost -= ImmCosts;
-          LLVM_DEBUG(dbgs() << "Offset " << Diff.value() << " "
+          LLVM_DEBUG(dbgs() << "Offset " << *Diff << " "
                             << "has penalty: " << ImmCosts << "\n"
                             << "Adjusted cost: " << Cost << "\n");
         }
@@ -723,7 +713,7 @@ void ConstantHoistingPass::findBaseConstants(GlobalVariable *BaseGV) {
 
 /// Updates the operand at Idx in instruction Inst with the result of
 ///        instruction Mat. If the instruction is a PHI node then special
-///        handling for duplicate values form the same incoming basic block is
+///        handling for duplicate values from the same incoming basic block is
 ///        required.
 /// \return The update will always succeed, but the return value indicated if
 ///         Mat was used for the update or not.
@@ -863,12 +853,12 @@ bool ConstantHoistingPass::emitBaseConstants(GlobalVariable *BaseGV) {
     unsigned NotRebasedNum = 0;
     for (Instruction *IP : IPSet) {
       // First, collect constants depending on this IP of the base.
-      unsigned Uses = 0;
+      UsesNum = 0;
       using RebasedUse = std::tuple<Constant *, Type *, ConstantUser>;
       SmallVector<RebasedUse, 4> ToBeRebased;
       for (auto const &RCI : ConstInfo.RebasedConstants) {
+        UsesNum += RCI.Uses.size();
         for (auto const &U : RCI.Uses) {
-          Uses++;
           BasicBlock *OrigMatInsertBB =
               findMatInsertPt(U.Inst, U.OpndIdx)->getParent();
           // If Base constant is to be inserted in multiple places,
@@ -878,7 +868,6 @@ bool ConstantHoistingPass::emitBaseConstants(GlobalVariable *BaseGV) {
             ToBeRebased.push_back(RebasedUse(RCI.Offset, RCI.Ty, U));
         }
       }
-      UsesNum = Uses;
 
       // If only few constants depend on this IP of base, skip rebasing,
       // assuming the base and the rebased have the same materialization cost.

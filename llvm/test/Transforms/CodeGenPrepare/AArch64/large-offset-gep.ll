@@ -7,7 +7,7 @@ define void @test1(ptr %s, i32 %n) {
 ; CHECK-LABEL: test1:
 ; CHECK:       // %bb.0: // %entry
 ; CHECK-NEXT:    ldr x9, [x0]
-; CHECK-NEXT:    mov w10, #40000
+; CHECK-NEXT:    mov w10, #40000 // =0x9c40
 ; CHECK-NEXT:    mov w8, wzr
 ; CHECK-NEXT:    add x9, x9, x10
 ; CHECK-NEXT:    cmp w8, w1
@@ -47,7 +47,7 @@ define void @test2(ptr %struct, i32 %n) {
 ; CHECK:       // %bb.0: // %entry
 ; CHECK-NEXT:    cbz x0, .LBB1_3
 ; CHECK-NEXT:  // %bb.1: // %while_cond.preheader
-; CHECK-NEXT:    mov w9, #40000
+; CHECK-NEXT:    mov w9, #40000 // =0x9c40
 ; CHECK-NEXT:    mov w8, wzr
 ; CHECK-NEXT:    add x9, x0, x9
 ; CHECK-NEXT:    cmp w8, w1
@@ -89,7 +89,7 @@ define void @test3(ptr %s1, ptr %s2, i1 %cond, i32 %n) {
 ; CHECK-NEXT:    csel x9, x1, x0, ne
 ; CHECK-NEXT:    cbz x9, .LBB2_3
 ; CHECK-NEXT:  // %bb.1: // %while_cond.preheader
-; CHECK-NEXT:    mov w10, #40000
+; CHECK-NEXT:    mov w10, #40000 // =0x9c40
 ; CHECK-NEXT:    mov w8, wzr
 ; CHECK-NEXT:    add x9, x9, x10
 ; CHECK-NEXT:    cmp w8, w3
@@ -138,8 +138,8 @@ define void @test4(i32 %n) uwtable personality ptr @__FrameHandler {
 ; CHECK-LABEL: test4:
 ; CHECK:       .Lfunc_begin0:
 ; CHECK-NEXT:    .cfi_startproc
-; CHECK-NEXT:    .cfi_personality 0, __FrameHandler
-; CHECK-NEXT:    .cfi_lsda 0, .Lexception0
+; CHECK-NEXT:    .cfi_personality 156, DW.ref.__FrameHandler
+; CHECK-NEXT:    .cfi_lsda 28, .Lexception0
 ; CHECK-NEXT:  // %bb.0: // %entry
 ; CHECK-NEXT:    stp x30, x21, [sp, #-32]! // 16-byte Folded Spill
 ; CHECK-NEXT:    .cfi_def_cfa_offset 32
@@ -151,7 +151,7 @@ define void @test4(i32 %n) uwtable personality ptr @__FrameHandler {
 ; CHECK-NEXT:    .cfi_remember_state
 ; CHECK-NEXT:    mov w19, w0
 ; CHECK-NEXT:    mov w20, wzr
-; CHECK-NEXT:    mov w21, #40000
+; CHECK-NEXT:    mov w21, #40000 // =0x9c40
 ; CHECK-NEXT:  .LBB3_1: // %while_cond
 ; CHECK-NEXT:    // =>This Inner Loop Header: Depth=1
 ; CHECK-NEXT:  .Ltmp0:
@@ -258,29 +258,33 @@ while_end:
 
 declare ptr @llvm.strip.invariant.group.p0(ptr)
 
-define void @test_invariant_group(i32 %arg) {
+define void @test_invariant_group(i32 %arg, i1 %c) {
 ; CHECK-LABEL: test_invariant_group:
 ; CHECK:       // %bb.0: // %bb
-; CHECK-NEXT:    cbz wzr, .LBB5_2
+; CHECK-NEXT:    tbz w1, #0, .LBB5_4
 ; CHECK-NEXT:  // %bb.1: // %bb6
 ; CHECK-NEXT:    cbz w0, .LBB5_3
-; CHECK-NEXT:  .LBB5_2: // %bb5
-; CHECK-NEXT:    ret
+; CHECK-NEXT:  .LBB5_2: // %bb1
+; CHECK-NEXT:    // =>This Inner Loop Header: Depth=1
+; CHECK-NEXT:    tbnz w1, #0, .LBB5_2
+; CHECK-NEXT:    b .LBB5_4
 ; CHECK-NEXT:  .LBB5_3: // %bb2
-; CHECK-NEXT:    cbnz wzr, .LBB5_2
-; CHECK-NEXT:  // %bb.4: // %bb4
-; CHECK-NEXT:    mov w8, #1
+; CHECK-NEXT:    tbz w1, #0, .LBB5_5
+; CHECK-NEXT:  .LBB5_4: // %bb5
+; CHECK-NEXT:    ret
+; CHECK-NEXT:  .LBB5_5: // %bb4
+; CHECK-NEXT:    mov w8, #1 // =0x1
 ; CHECK-NEXT:    str x8, [x8]
 ; CHECK-NEXT:    ret
 bb:
-  br i1 undef, label %bb6, label %bb5
+  br i1 %c, label %bb6, label %bb5
 
 bb1:                                              ; preds = %bb6, %bb1
-  br i1 undef, label %bb1, label %bb5
+  br i1 %c, label %bb1, label %bb5
 
 bb2:                                              ; preds = %bb6
   %i = getelementptr inbounds i8, ptr %i7, i32 40000
-  br i1 undef, label %bb5, label %bb4
+  br i1 %c, label %bb5, label %bb4
 
 bb4:                                              ; preds = %bb2
   store i64 1, ptr %i, align 8

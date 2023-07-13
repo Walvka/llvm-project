@@ -67,7 +67,7 @@ entry:
 ; ASM32-NEXT:                                          # -IsFloatingPointOperationLogOrAbortEnabled
 ; ASM32-NEXT:          .byte   0x40                            # -IsInterruptHandler, +IsFunctionNamePresent, -IsAllocaUsed
 ; ASM32-NEXT:                                          # OnConditionDirective = 0, -IsCRSaved, -IsLRSaved
-; ASM32-NEXT:          .byte   0x80                            # +IsBackChainStored, -IsFixup, NumOfFPRsSaved = 0
+; ASM32-NEXT:          .byte   0x00                            # -IsBackChainStored, -IsFixup, NumOfFPRsSaved = 0
 ; ASM32-NEXT:          .byte   0x00                            # -HasExtensionTable, -HasVectorInfo, NumOfGPRsSaved = 0
 ; ASM32-NEXT:          .byte   0x00                            # NumberOfFixedParms = 0
 ; ASM32-NEXT:          .byte   0x01                            # NumberOfFPParms = 0, +HasParmsOnStack
@@ -268,7 +268,7 @@ entry:
 ; ASM64-NEXT:                                          # -IsFloatingPointOperationLogOrAbortEnabled
 ; ASM64-NEXT:          .byte   0x40                            # -IsInterruptHandler, +IsFunctionNamePresent, -IsAllocaUsed
 ; ASM64-NEXT:                                          # OnConditionDirective = 0, -IsCRSaved, -IsLRSaved
-; ASM64-NEXT:          .byte   0x80                            # +IsBackChainStored, -IsFixup, NumOfFPRsSaved = 0
+; ASM64-NEXT:          .byte   0x00                            # -IsBackChainStored, -IsFixup, NumOfFPRsSaved = 0
 ; ASM64-NEXT:          .byte   0x00                            # -HasExtensionTable, -HasVectorInfo, NumOfGPRsSaved = 0
 ; ASM64-NEXT:          .byte   0x00                            # NumberOfFixedParms = 0
 ; ASM64-NEXT:          .byte   0x01                            # NumberOfFPParms = 0, +HasParmsOnStack
@@ -517,8 +517,8 @@ entry:
 ; DWARF32-NEXT:        dir_index: 0
 ; DWARF32-NEXT:         mod_time: 0x00000000
 ; DWARF32-NEXT:           length: 0x00000000
-; DWARF32:       Address            Line   Column File   ISA Discriminator Flags
-; DWARF32-NEXT:  ------------------ ------ ------ ------ --- ------------- -------------
-; DWARF32-NEXT:  0x0000000000000000      2      0      1   0             0  is_stmt
-; DWARF32-NEXT:  0x0000000000000004      3      3      1   0             0  is_stmt prologue_end
-; DWARF32-NEXT:  0x0000000000000024      3      3      1   0             0  is_stmt end_sequence
+; DWARF32:       Address            Line   Column File   ISA Discriminator OpIndex Flags
+; DWARF32-NEXT:  ------------------ ------ ------ ------ --- ------------- ------- -------------
+; DWARF32-NEXT:  0x0000000000000000      2      0      1   0             0       0  is_stmt
+; DWARF32-NEXT:  0x0000000000000004      3      3      1   0             0       0  is_stmt prologue_end
+; DWARF32-NEXT:  0x0000000000000024      3      3      1   0             0       0  is_stmt end_sequence

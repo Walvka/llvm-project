@@ -17,7 +17,6 @@
 #include "llvm-c/Disassembler.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Config/config.h"
 #include "llvm/DebugInfo/DIContext.h"
@@ -49,6 +48,7 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cstring>
 #include <system_error>
@@ -255,19 +255,19 @@ static uint64_t DumpDataInCode(const uint8_t *bytes, uint64_t Length,
   case MachO::DICE_KIND_DATA:
     if (Length >= 4) {
       if (ShowRawInsn)
-        dumpBytes(makeArrayRef(bytes, 4), outs());
+        dumpBytes(ArrayRef(bytes, 4), outs());
       Value = bytes[3] << 24 | bytes[2] << 16 | bytes[1] << 8 | bytes[0];
       outs() << "\t.long " << Value;
       Size = 4;
     } else if (Length >= 2) {
       if (ShowRawInsn)
-        dumpBytes(makeArrayRef(bytes, 2), outs());
+        dumpBytes(ArrayRef(bytes, 2), outs());
       Value = bytes[1] << 8 | bytes[0];
       outs() << "\t.short " << Value;
       Size = 2;
     } else {
       if (ShowRawInsn)
-        dumpBytes(makeArrayRef(bytes, 2), outs());
+        dumpBytes(ArrayRef(bytes, 2), outs());
       Value = bytes[0];
       outs() << "\t.byte " << Value;
       Size = 1;
@@ -279,14 +279,14 @@ static uint64_t DumpDataInCode(const uint8_t *bytes, uint64_t Length,
     break;
   case MachO::DICE_KIND_JUMP_TABLE8:
     if (ShowRawInsn)
-      dumpBytes(makeArrayRef(bytes, 1), outs());
+      dumpBytes(ArrayRef(bytes, 1), outs());
     Value = bytes[0];
     outs() << "\t.byte " << format("%3u", Value) << "\t@ KIND_JUMP_TABLE8\n";
     Size = 1;
     break;
   case MachO::DICE_KIND_JUMP_TABLE16:
     if (ShowRawInsn)
-      dumpBytes(makeArrayRef(bytes, 2), outs());
+      dumpBytes(ArrayRef(bytes, 2), outs());
     Value = bytes[1] << 8 | bytes[0];
     outs() << "\t.short " << format("%5u", Value & 0xffff)
            << "\t@ KIND_JUMP_TABLE16\n";
@@ -295,7 +295,7 @@ static uint64_t DumpDataInCode(const uint8_t *bytes, uint64_t Length,
   case MachO::DICE_KIND_JUMP_TABLE32:
   case MachO::DICE_KIND_ABS_JUMP_TABLE32:
     if (ShowRawInsn)
-      dumpBytes(makeArrayRef(bytes, 4), outs());
+      dumpBytes(ArrayRef(bytes, 4), outs());
     Value = bytes[3] << 24 | bytes[2] << 16 | bytes[1] << 8 | bytes[0];
     outs() << "\t.long " << Value;
     if (Kind == MachO::DICE_KIND_JUMP_TABLE32)
@@ -2142,6 +2142,7 @@ static void printObjcMetaData(MachOObjectFile *O, bool verbose);
 static void ProcessMachO(StringRef Name, MachOObjectFile *MachOOF,
                          StringRef ArchiveMemberName = StringRef(),
                          StringRef ArchitectureName = StringRef()) {
+  Dumper D(*MachOOF);
   // If we are doing some processing here on the Mach-O file print the header
   // info.  And don't print it otherwise like in the case of printing the
   // UniversalHeaders or ArchiveHeaders.
@@ -2227,7 +2228,7 @@ static void ProcessMachO(StringRef Name, MachOObjectFile *MachOOF,
   if (DylibId)
     PrintDylibs(MachOOF, true);
   if (SymbolTable)
-    printSymbolTable(*MachOOF, ArchiveName, ArchitectureName);
+    D.printSymbolTable(ArchiveName, ArchitectureName);
   if (UnwindInfo)
     printMachOUnwindInfo(MachOOF);
   if (PrivateHeaders) {
@@ -7280,9 +7281,7 @@ static const char *SymbolizerSymbolLookUp(void *DisInfo,
     } else if (SymbolName != nullptr && strncmp(SymbolName, "__Z", 3) == 0) {
       if (info->demangled_name != nullptr)
         free(info->demangled_name);
-      int status;
-      info->demangled_name =
-          itaniumDemangle(SymbolName + 1, nullptr, nullptr, &status);
+      info->demangled_name = itaniumDemangle(SymbolName + 1);
       if (info->demangled_name != nullptr) {
         *ReferenceName = info->demangled_name;
         *ReferenceType = LLVMDisassembler_ReferenceType_DeMangled_Name;
@@ -7380,9 +7379,7 @@ static const char *SymbolizerSymbolLookUp(void *DisInfo,
   } else if (SymbolName != nullptr && strncmp(SymbolName, "__Z", 3) == 0) {
     if (info->demangled_name != nullptr)
       free(info->demangled_name);
-    int status;
-    info->demangled_name =
-        itaniumDemangle(SymbolName + 1, nullptr, nullptr, &status);
+    info->demangled_name = itaniumDemangle(SymbolName + 1);
     if (info->demangled_name != nullptr) {
       *ReferenceName = info->demangled_name;
       *ReferenceType = LLVMDisassembler_ReferenceType_DeMangled_Name;
@@ -7916,7 +7913,7 @@ static void DisassembleMachO(StringRef Filename, MachOObjectFile *MachOOF,
                                            Annotations);
         if (gotInst) {
           if (ShowRawInsn || Arch == Triple::arm) {
-            dumpBytes(makeArrayRef(Bytes.data() + Index, Size), outs());
+            dumpBytes(ArrayRef(Bytes.data() + Index, Size), outs());
           }
           formatted_raw_ostream FormattedOS(outs());
           StringRef AnnotationsStr = Annotations.str();
@@ -7997,7 +7994,7 @@ static void DisassembleMachO(StringRef Filename, MachOObjectFile *MachOOF,
           }
           if (ShowRawInsn || Arch == Triple::arm) {
             outs() << "\t";
-            dumpBytes(makeArrayRef(Bytes.data() + Index, InstSize), outs());
+            dumpBytes(ArrayRef(Bytes.data() + Index, InstSize), outs());
           }
           StringRef AnnotationsStr = Annotations.str();
           IP->printInst(&Inst, PC, AnnotationsStr, *STI, outs());
@@ -10362,6 +10359,8 @@ static void PrintLinkEditDataCommand(MachO::linkedit_data_command ld,
     outs() << "      cmd LC_DYLD_EXPORTS_TRIE\n";
   else if (ld.cmd == MachO::LC_DYLD_CHAINED_FIXUPS)
     outs() << "      cmd LC_DYLD_CHAINED_FIXUPS\n";
+  else if (ld.cmd == MachO::LC_ATOM_INFO)
+    outs() << "      cmd LC_ATOM_INFO\n";
   else
     outs() << "      cmd " << ld.cmd << " (?)\n";
   outs() << "  cmdsize " << ld.cmdsize;
@@ -10507,7 +10506,8 @@ static void PrintLoadCommands(const MachOObjectFile *Obj, uint32_t filetype,
                Command.C.cmd == MachO::LC_DYLIB_CODE_SIGN_DRS ||
                Command.C.cmd == MachO::LC_LINKER_OPTIMIZATION_HINT ||
                Command.C.cmd == MachO::LC_DYLD_EXPORTS_TRIE ||
-               Command.C.cmd == MachO::LC_DYLD_CHAINED_FIXUPS) {
+               Command.C.cmd == MachO::LC_DYLD_CHAINED_FIXUPS ||
+               Command.C.cmd == MachO::LC_ATOM_INFO) {
       MachO::linkedit_data_command Ld =
           Obj->getLinkeditDataLoadCommand(Command);
       PrintLinkEditDataCommand(Ld, Buf.size());

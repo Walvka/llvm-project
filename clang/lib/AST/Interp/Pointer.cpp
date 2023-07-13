@@ -16,12 +16,15 @@ using namespace clang::interp;
 
 Pointer::Pointer(Block *Pointee) : Pointer(Pointee, 0, 0) {}
 
+Pointer::Pointer(Block *Pointee, unsigned BaseAndOffset)
+    : Pointer(Pointee, BaseAndOffset, BaseAndOffset) {}
+
 Pointer::Pointer(const Pointer &P) : Pointer(P.Pointee, P.Base, P.Offset) {}
 
 Pointer::Pointer(Pointer &&P)
     : Pointee(P.Pointee), Base(P.Base), Offset(P.Offset) {
   if (Pointee)
-    Pointee->movePointer(&P, this);
+    Pointee->replacePointer(&P, this);
 }
 
 Pointer::Pointer(Block *Pointee, unsigned Base, unsigned Offset)
@@ -66,7 +69,7 @@ void Pointer::operator=(Pointer &&P) {
 
   Pointee = P.Pointee;
   if (Pointee)
-    Pointee->movePointer(&P, this);
+    Pointee->replacePointer(&P, this);
 
   if (Old)
     Old->cleanup();
@@ -98,6 +101,10 @@ APValue Pointer::toAPValue() const {
     IsNullPtr = false;
 
     if (isUnknownSizeArray()) {
+      IsOnePastEnd = false;
+      Offset = CharUnits::Zero();
+    } else if (Desc->asExpr()) {
+      // Pointer pointing to a an expression.
       IsOnePastEnd = false;
       Offset = CharUnits::Zero();
     } else {
@@ -140,7 +147,7 @@ APValue Pointer::toAPValue() const {
 
 bool Pointer::isInitialized() const {
   assert(Pointee && "Cannot check if null pointer was initialized");
-  Descriptor *Desc = getFieldDesc();
+  const Descriptor *Desc = getFieldDesc();
   assert(Desc);
   if (Desc->isPrimitiveArray()) {
     if (isStatic() && Base == 0)
@@ -152,39 +159,38 @@ bool Pointer::isInitialized() const {
     if (Map == (InitMap *)-1)
       return true;
     return Map->isInitialized(getIndex());
-  } else {
-    // Field has its bit in an inline descriptor.
-    return Base == 0 || getInlineDesc()->IsInitialized;
   }
+
+  // Field has its bit in an inline descriptor.
+  return Base == 0 || getInlineDesc()->IsInitialized;
 }
 
 void Pointer::initialize() const {
   assert(Pointee && "Cannot initialize null pointer");
-  Descriptor *Desc = getFieldDesc();
+  const Descriptor *Desc = getFieldDesc();
 
   assert(Desc);
-  if (Desc->isArray()) {
-    if (Desc->isPrimitiveArray()) {
-      // Primitive global arrays don't have an initmap.
-      if (isStatic() && Base == 0)
-        return;
+  if (Desc->isPrimitiveArray()) {
+    // Primitive global arrays don't have an initmap.
+    if (isStatic() && Base == 0)
+      return;
 
-      // Primitive array initializer.
-      InitMap *&Map = getInitMap();
-      if (Map == (InitMap *)-1)
-        return;
-      if (Map == nullptr)
-        Map = InitMap::allocate(Desc->getNumElems());
-      if (Map->initialize(getIndex())) {
-        free(Map);
-        Map = (InitMap *)-1;
-      }
+    // Primitive array initializer.
+    InitMap *&Map = getInitMap();
+    if (Map == (InitMap *)-1)
+      return;
+    if (Map == nullptr)
+      Map = InitMap::allocate(Desc->getNumElems());
+    if (Map->initialize(getIndex())) {
+      free(Map);
+      Map = (InitMap *)-1;
     }
-  } else {
-    // Field has its bit in an inline descriptor.
-    assert(Base != 0 && "Only composite fields can be initialised");
-    getInlineDesc()->IsInitialized = true;
+    return;
   }
+
+  // Field has its bit in an inline descriptor.
+  assert(Base != 0 && "Only composite fields can be initialised");
+  getInlineDesc()->IsInitialized = true;
 }
 
 void Pointer::activate() const {

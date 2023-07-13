@@ -45,6 +45,17 @@ def FalseLanesNone  : FalseLanesEnum<0>;
 def FalseLanesZero  : FalseLanesEnum<1>;
 def FalseLanesUndef : FalseLanesEnum<2>;
 
+class SMEMatrixTypeEnum<bits<3> val> {
+  bits<3> Value = val;
+}
+def SMEMatrixNone  : SMEMatrixTypeEnum<0>;
+def SMEMatrixTileB : SMEMatrixTypeEnum<1>;
+def SMEMatrixTileH : SMEMatrixTypeEnum<2>;
+def SMEMatrixTileS : SMEMatrixTypeEnum<3>;
+def SMEMatrixTileD : SMEMatrixTypeEnum<4>;
+def SMEMatrixTileQ : SMEMatrixTypeEnum<5>;
+def SMEMatrixArray : SMEMatrixTypeEnum<6>;
+
 // AArch64 Instruction Format
 class AArch64Inst<Format f, string cstr> : Instruction {
   field bits<32> Inst; // Instruction encoding.
@@ -65,16 +76,18 @@ class AArch64Inst<Format f, string cstr> : Instruction {
   bit isPTestLike = 0;
   FalseLanesEnum FalseLanes = FalseLanesNone;
   DestructiveInstTypeEnum DestructiveInstType = NotDestructive;
+  SMEMatrixTypeEnum SMEMatrixType = SMEMatrixNone;
   ElementSizeEnum ElementSize = ElementSizeNone;
 
-  let TSFlags{10}  = isPTestLike;
-  let TSFlags{9}   = isWhile;
-  let TSFlags{8-7} = FalseLanes.Value;
-  let TSFlags{6-3} = DestructiveInstType.Value;
-  let TSFlags{2-0} = ElementSize.Value;
+  let TSFlags{13-11} = SMEMatrixType.Value;
+  let TSFlags{10}    = isPTestLike;
+  let TSFlags{9}     = isWhile;
+  let TSFlags{8-7}   = FalseLanes.Value;
+  let TSFlags{6-3}   = DestructiveInstType.Value;
+  let TSFlags{2-0}   = ElementSize.Value;
 
-  let Pattern     = [];
-  let Constraints = cstr;
+  let Pattern       = [];
+  let Constraints   = cstr;
 }
 
 class InstSubst<string Asm, dag Result, bit EmitPriority = 0>
@@ -272,7 +285,7 @@ def AdrpOperand : AsmOperandClass {
 }
 def adrplabel : Operand<i64> {
   let EncoderMethod = "getAdrLabelOpValue";
-  let PrintMethod = "printAdrpLabel";
+  let PrintMethod = "printAdrAdrpLabel";
   let ParserMatchClass = AdrpOperand;
   let OperandType = "OPERAND_PCREL";
 }
@@ -284,7 +297,9 @@ def AdrOperand : AsmOperandClass {
 }
 def adrlabel : Operand<i64> {
   let EncoderMethod = "getAdrLabelOpValue";
+  let PrintMethod = "printAdrAdrpLabel";
   let ParserMatchClass = AdrOperand;
+  let OperandType = "OPERAND_PCREL";
 }
 
 class SImmOperand<int width> : AsmOperandClass {
@@ -872,6 +887,10 @@ def timm32_0_65535 : Operand<i32>, TImmLeaf<i32, [{
 }]>;
 
 def timm64_0_65535 : Operand<i64>, TImmLeaf<i64, [{
+  return ((uint64_t)Imm) < 65536;
+}]>;
+
+def imm64_0_65535 : Operand<i64>, ImmLeaf<i64, [{
   return ((uint64_t)Imm) < 65536;
 }]>;
 }
@@ -1730,6 +1749,11 @@ def SystemPStateFieldWithImm0_15Operand : AsmOperandClass {
 def pstatefield4_op : Operand<i32> {
   let ParserMatchClass = SystemPStateFieldWithImm0_15Operand;
   let PrintMethod = "printSystemPStateField";
+  let MCOperandPredicate = [{
+    if (!MCOp.isImm())
+      return false;
+    return AArch64SVCR::lookupPStateImm0_15ByEncoding(MCOp.getImm()) != nullptr;
+  }];
 }
 
 // Instructions to modify PSTATE, no input reg
@@ -1752,10 +1776,10 @@ class MSRpstateImm0_15
   let Inst{11-8} = imm;
   let Inst{7-5} = pstatefield{2-0};
 
-  let DecoderMethod = "DecodeSystemPStateInstruction";
+  let DecoderMethod = "DecodeSystemPStateImm0_15Instruction";
   // MSRpstateI aliases with MSRI. When the MSRpstateI decoder method returns
   // Fail the decoder should attempt to decode the instruction as MSRI.
-  let hasCompleteDecoder = 0;
+  let hasCompleteDecoder = false;
 }
 
 def SystemPStateFieldWithImm0_1Operand : AsmOperandClass {
@@ -1765,6 +1789,11 @@ def SystemPStateFieldWithImm0_1Operand : AsmOperandClass {
 def pstatefield1_op : Operand<i32> {
   let ParserMatchClass = SystemPStateFieldWithImm0_1Operand;
   let PrintMethod = "printSystemPStateField";
+  let MCOperandPredicate = [{
+    if (!MCOp.isImm())
+      return false;
+    return AArch64SVCR::lookupPStateImm0_1ByEncoding(MCOp.getImm()) != nullptr;
+  }];
 }
 
 class MSRpstateImm0_1
@@ -1772,17 +1801,18 @@ class MSRpstateImm0_1
                  "\t$pstatefield, $imm">,
     Sched<[WriteSys]> {
 
-  bits<6> pstatefield;
+  bits<9> pstatefield;
   bit imm;
   let Inst{18-16} = pstatefield{5-3};
-  let Inst{11-9} = 0b000;
+  let Inst{11-9} = pstatefield{8-6};
   let Inst{8} = imm;
   let Inst{7-5} = pstatefield{2-0};
 
-  let DecoderMethod = "DecodeSystemPStateInstruction";
+  let DecoderMethod = "DecodeSystemPStateImm0_1Instruction";
   // MSRpstateI aliases with MSRI. When the MSRpstateI decoder method returns
   // Fail the decoder should attempt to decode the instruction as MSRI.
-  let hasCompleteDecoder = 0;
+  let hasCompleteDecoder = false;
+  let DecoderNamespace = "Fallback";
 }
 
 // SYS and SYSL generic system instructions.
@@ -4647,7 +4677,7 @@ class BaseMemTagStore<bits<2> opc1, bits<2> opc2, string asm_insn,
 }
 
 multiclass MemTagStore<bits<2> opc1, string insn> {
-  def Offset :
+  def i :
     BaseMemTagStore<opc1, 0b10, insn, "\t$Rt, [$Rn, $offset]", "",
                     (outs), (ins GPR64sp:$Rt, GPR64sp:$Rn, simm9s16:$offset)>;
   def PreIndex :
@@ -4662,7 +4692,7 @@ multiclass MemTagStore<bits<2> opc1, string insn> {
                     (ins GPR64sp:$Rt, GPR64sp:$Rn, simm9s16:$offset)>;
 
   def : InstAlias<insn # "\t$Rt, [$Rn]",
-                  (!cast<Instruction>(NAME # "Offset") GPR64sp:$Rt, GPR64sp:$Rn, 0)>;
+                  (!cast<Instruction>(NAME # "i") GPR64sp:$Rt, GPR64sp:$Rn, 0)>;
 }
 
 //---
@@ -7437,7 +7467,7 @@ multiclass SIMDAcrossLanesHSD<bit U, bits<5> opcode, string asm> {
 
 let mayRaiseFPException = 1, Uses = [FPCR] in
 multiclass SIMDFPAcrossLanes<bits<5> opcode, bit sz1, string asm,
-                            Intrinsic intOp> {
+                            SDPatternOperator intOp> {
   let Predicates = [HasNEON, HasFullFP16] in {
   def v4i16v : BaseSIMDAcrossLanes<0, 0, {sz1, 0}, opcode, FPR16, V64,
                                    asm, ".4h",
@@ -8397,9 +8427,9 @@ multiclass SIMDThreeSameVectorFMLIndex<bit U, bits<4> opc, string asm,
                                               V128, v4f32, v8f16, OpNode>;
 }
 
-let mayRaiseFPException = 1, Uses = [FPCR] in
 multiclass SIMDFPIndexed<bit U, bits<4> opc, string asm,
                          SDPatternOperator OpNode> {
+  let mayRaiseFPException = 1, Uses = [FPCR] in {
   let Predicates = [HasNEON, HasFullFP16] in {
   def v4i16_indexed : BaseSIMDIndexed<0, U, 0, 0b00, opc,
                                       V64, V64,
@@ -8501,6 +8531,29 @@ multiclass SIMDFPIndexed<bit U, bits<4> opc, string asm,
     bits<1> idx;
     let Inst{11} = idx{0};
     let Inst{21} = 0;
+  }
+  } // mayRaiseFPException = 1, Uses = [FPCR]
+
+  let Predicates = [HasNEON, HasFullFP16] in {
+  def : Pat<(f16 (OpNode
+                   (f16 (vector_extract (v8f16 V128:$Rn), (i64 0))),
+                   (f16 (vector_extract (v8f16 V128:$Rm), VectorIndexH:$idx)))),
+            (!cast<Instruction>(NAME # v1i16_indexed)
+              (EXTRACT_SUBREG V128:$Rn, hsub), V128:$Rm, VectorIndexH:$idx)>;
+  }
+
+  let Predicates = [HasNEON] in {
+  def : Pat<(f32 (OpNode
+                   (f32 (vector_extract (v4f32 V128:$Rn), (i64 0))),
+                   (f32 (vector_extract (v4f32 V128:$Rm), VectorIndexS:$idx)))),
+            (!cast<Instruction>(NAME # v1i32_indexed)
+              (EXTRACT_SUBREG V128:$Rn, ssub), V128:$Rm, VectorIndexS:$idx)>;
+
+  def : Pat<(f64 (OpNode
+                   (f64 (vector_extract (v2f64 V128:$Rn), (i64 0))),
+                   (f64 (vector_extract (v2f64 V128:$Rm), VectorIndexD:$idx)))),
+            (!cast<Instruction>(NAME # v1i64_indexed)
+              (EXTRACT_SUBREG V128:$Rn, dsub), V128:$Rm, VectorIndexD:$idx)>;
   }
 }
 
@@ -10836,19 +10889,19 @@ multiclass SIMDIndexedSQRDMLxHSDTied<bit U, bits<4> opc, string asm,
     let Inst{21} = idx{0};
   }
 
-  def i16_indexed : BaseSIMDIndexedTied<1, U, 1, 0b01, opc,
-                                        FPR16Op, FPR16Op, V128_lo,
-                                        VectorIndexH, asm, ".h", "", "", ".h",
-                                        []> {
+  def v1i16_indexed : BaseSIMDIndexedTied<1, U, 1, 0b01, opc,
+                                          FPR16Op, FPR16Op, V128_lo,
+                                          VectorIndexH, asm, ".h", "", "", ".h",
+                                          []> {
     bits<3> idx;
     let Inst{11} = idx{2};
     let Inst{21} = idx{1};
     let Inst{20} = idx{0};
   }
 
-  def i32_indexed : BaseSIMDIndexedTied<1, U, 1, 0b10, opc,
-                                        FPR32Op, FPR32Op, V128, VectorIndexS,
-                                        asm, ".s", "", "", ".s",
+  def v1i32_indexed : BaseSIMDIndexedTied<1, U, 1, 0b10, opc,
+                                          FPR32Op, FPR32Op, V128, VectorIndexS,
+                                          asm, ".s", "", "", ".s",
     [(set (i32 FPR32Op:$dst),
           (i32 (op (i32 FPR32Op:$Rd), (i32 FPR32Op:$Rn),
                    (i32 (vector_extract (v4i32 V128:$Rm),
@@ -11697,6 +11750,10 @@ multiclass MOPSMemorySetTaggingInsns<bits<2> opcode, string asm> {
   def TN : MOPSMemorySetTagging<opcode, 1, 1, asm # "tn">;
 }
 
+//----------------------------------------------------------------------------
+// 2022 Armv8.9/Armv9.4 Extensions
+//----------------------------------------------------------------------------
+
 //---
 // 2022 Architecture Extensions: General Data Processing (FEAT_CSSC)
 //---
@@ -11760,10 +11817,6 @@ multiclass ComparisonOp<bit isUnsigned, bit isMin, string asm,
                                 !cond(isUnsigned : uimm8_64b,
                                       !not(isUnsigned) : simm8_64b), asm, OpNode>;
 }
-
-//----------------------------------------------------------------------------
-// 2022 Armv8.9/Armv9.4 Extensions
-//----------------------------------------------------------------------------
 
 //---
 // RCPC instructions (FEAT_LRCPC3)

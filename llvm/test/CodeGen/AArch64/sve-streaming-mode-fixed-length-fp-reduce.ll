@@ -33,7 +33,7 @@ define half @fadda_v8f16(half %start, <8 x half> %a) #0 {
   ret half %res
 }
 
-define half @fadda_v16f16(half %start, <16 x half>* %a) #0 {
+define half @fadda_v16f16(half %start, ptr %a) #0 {
 ; CHECK-LABEL: fadda_v16f16:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q2, [x0]
@@ -43,7 +43,7 @@ define half @fadda_v16f16(half %start, <16 x half>* %a) #0 {
 ; CHECK-NEXT:    fadda h0, p0, h0, z2.h
 ; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <16 x half>, <16 x half>* %a
+  %op = load <16 x half>, ptr %a
   %res = call half @llvm.vector.reduce.fadd.v16f16(half %start, <16 x half> %op)
   ret half %res
 }
@@ -74,7 +74,7 @@ define float @fadda_v4f32(float %start, <4 x float> %a) #0 {
   ret float %res
 }
 
-define float @fadda_v8f32(float %start, <8 x float>* %a) #0 {
+define float @fadda_v8f32(float %start, ptr %a) #0 {
 ; CHECK-LABEL: fadda_v8f32:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q2, [x0]
@@ -84,7 +84,7 @@ define float @fadda_v8f32(float %start, <8 x float>* %a) #0 {
 ; CHECK-NEXT:    fadda s0, p0, s0, z2.s
 ; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <8 x float>, <8 x float>* %a
+  %op = load <8 x float>, ptr %a
   %res = call float @llvm.vector.reduce.fadd.v8f32(float %start, <8 x float> %op)
   ret float %res
 }
@@ -112,7 +112,7 @@ define double @fadda_v2f64(double %start, <2 x double> %a) #0 {
   ret double %res
 }
 
-define double @fadda_v4f64(double %start, <4 x double>* %a) #0 {
+define double @fadda_v4f64(double %start, ptr %a) #0 {
 ; CHECK-LABEL: fadda_v4f64:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q2, [x0]
@@ -122,7 +122,7 @@ define double @fadda_v4f64(double %start, <4 x double>* %a) #0 {
 ; CHECK-NEXT:    fadda d0, p0, d0, z2.d
 ; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <4 x double>, <4 x double>* %a
+  %op = load <4 x double>, ptr %a
   %res = call double @llvm.vector.reduce.fadd.v4f64(double %start, <4 x double> %op)
   ret double %res
 }
@@ -155,7 +155,7 @@ define half @faddv_v8f16(half %start, <8 x half> %a) #0 {
   ret half %res
 }
 
-define half @faddv_v16f16(half %start, <16 x half>* %a) #0 {
+define half @faddv_v16f16(half %start, ptr %a) #0 {
 ; CHECK-LABEL: faddv_v16f16:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q2, q1, [x0]
@@ -164,7 +164,7 @@ define half @faddv_v16f16(half %start, <16 x half>* %a) #0 {
 ; CHECK-NEXT:    faddv h1, p0, z1.h
 ; CHECK-NEXT:    fadd h0, h0, h1
 ; CHECK-NEXT:    ret
-  %op = load <16 x half>, <16 x half>* %a
+  %op = load <16 x half>, ptr %a
   %res = call fast half @llvm.vector.reduce.fadd.v16f16(half %start, <16 x half> %op)
   ret half %res
 }
@@ -193,7 +193,7 @@ define float @faddv_v4f32(float %start, <4 x float> %a) #0 {
   ret float %res
 }
 
-define float @faddv_v8f32(float %start, <8 x float>* %a) #0 {
+define float @faddv_v8f32(float %start, ptr %a) #0 {
 ; CHECK-LABEL: faddv_v8f32:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q2, q1, [x0]
@@ -202,7 +202,7 @@ define float @faddv_v8f32(float %start, <8 x float>* %a) #0 {
 ; CHECK-NEXT:    faddv s1, p0, z1.s
 ; CHECK-NEXT:    fadd s0, s0, s1
 ; CHECK-NEXT:    ret
-  %op = load <8 x float>, <8 x float>* %a
+  %op = load <8 x float>, ptr %a
   %res = call fast float @llvm.vector.reduce.fadd.v8f32(float %start, <8 x float> %op)
   ret float %res
 }
@@ -229,7 +229,7 @@ define double @faddv_v2f64(double %start, <2 x double> %a) #0 {
   ret double %res
 }
 
-define double @faddv_v4f64(double %start, <4 x double>* %a) #0 {
+define double @faddv_v4f64(double %start, ptr %a) #0 {
 ; CHECK-LABEL: faddv_v4f64:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q2, q1, [x0]
@@ -238,13 +238,13 @@ define double @faddv_v4f64(double %start, <4 x double>* %a) #0 {
 ; CHECK-NEXT:    faddv d1, p0, z1.d
 ; CHECK-NEXT:    fadd d0, d0, d1
 ; CHECK-NEXT:    ret
-  %op = load <4 x double>, <4 x double>* %a
+  %op = load <4 x double>, ptr %a
   %res = call fast double @llvm.vector.reduce.fadd.v4f64(double %start, <4 x double> %op)
   ret double %res
 }
 
 ;
-; FMAXV
+; FMAXNMV
 ;
 
 define half @fmaxv_v4f16(<4 x half> %a) #0 {
@@ -271,7 +271,7 @@ define half @fmaxv_v8f16(<8 x half> %a) #0 {
   ret half %res
 }
 
-define half @fmaxv_v16f16(<16 x half>* %a) #0 {
+define half @fmaxv_v16f16(ptr %a) #0 {
 ; CHECK-LABEL: fmaxv_v16f16:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q0, [x0]
@@ -280,7 +280,7 @@ define half @fmaxv_v16f16(<16 x half>* %a) #0 {
 ; CHECK-NEXT:    fmaxnmv h0, p0, z0.h
 ; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <16 x half>, <16 x half>* %a
+  %op = load <16 x half>, ptr %a
   %res = call half @llvm.vector.reduce.fmax.v16f16(<16 x half> %op)
   ret half %res
 }
@@ -309,7 +309,7 @@ define float @fmaxv_v4f32(<4 x float> %a) #0 {
   ret float %res
 }
 
-define float @fmaxv_v8f32(<8 x float>* %a) #0 {
+define float @fmaxv_v8f32(ptr %a) #0 {
 ; CHECK-LABEL: fmaxv_v8f32:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q0, [x0]
@@ -318,7 +318,7 @@ define float @fmaxv_v8f32(<8 x float>* %a) #0 {
 ; CHECK-NEXT:    fmaxnmv s0, p0, z0.s
 ; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <8 x float>, <8 x float>* %a
+  %op = load <8 x float>, ptr %a
   %res = call float @llvm.vector.reduce.fmax.v8f32(<8 x float> %op)
   ret float %res
 }
@@ -345,7 +345,7 @@ define double @fmaxv_v2f64(<2 x double> %a) #0 {
   ret double %res
 }
 
-define double @fmaxv_v4f64(<4 x double>* %a) #0 {
+define double @fmaxv_v4f64(ptr %a) #0 {
 ; CHECK-LABEL: fmaxv_v4f64:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q0, [x0]
@@ -354,13 +354,13 @@ define double @fmaxv_v4f64(<4 x double>* %a) #0 {
 ; CHECK-NEXT:    fmaxnmv d0, p0, z0.d
 ; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <4 x double>, <4 x double>* %a
+  %op = load <4 x double>, ptr %a
   %res = call double @llvm.vector.reduce.fmax.v4f64(<4 x double> %op)
   ret double %res
 }
 
 ;
-; FMINV
+; FMINNMV
 ;
 
 define half @fminv_v4f16(<4 x half> %a) #0 {
@@ -387,7 +387,7 @@ define half @fminv_v8f16(<8 x half> %a) #0 {
   ret half %res
 }
 
-define half @fminv_v16f16(<16 x half>* %a) #0 {
+define half @fminv_v16f16(ptr %a) #0 {
 ; CHECK-LABEL: fminv_v16f16:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q0, [x0]
@@ -396,7 +396,7 @@ define half @fminv_v16f16(<16 x half>* %a) #0 {
 ; CHECK-NEXT:    fminnmv h0, p0, z0.h
 ; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <16 x half>, <16 x half>* %a
+  %op = load <16 x half>, ptr %a
   %res = call half @llvm.vector.reduce.fmin.v16f16(<16 x half> %op)
   ret half %res
 }
@@ -425,7 +425,7 @@ define float @fminv_v4f32(<4 x float> %a) #0 {
   ret float %res
 }
 
-define float @fminv_v8f32(<8 x float>* %a) #0 {
+define float @fminv_v8f32(ptr %a) #0 {
 ; CHECK-LABEL: fminv_v8f32:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q0, [x0]
@@ -434,7 +434,7 @@ define float @fminv_v8f32(<8 x float>* %a) #0 {
 ; CHECK-NEXT:    fminnmv s0, p0, z0.s
 ; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <8 x float>, <8 x float>* %a
+  %op = load <8 x float>, ptr %a
   %res = call float @llvm.vector.reduce.fmin.v8f32(<8 x float> %op)
   ret float %res
 }
@@ -461,7 +461,7 @@ define double @fminv_v2f64(<2 x double> %a) #0 {
   ret double %res
 }
 
-define double @fminv_v4f64(<4 x double>* %a) #0 {
+define double @fminv_v4f64(ptr %a) #0 {
 ; CHECK-LABEL: fminv_v4f64:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldp q1, q0, [x0]
@@ -470,8 +470,240 @@ define double @fminv_v4f64(<4 x double>* %a) #0 {
 ; CHECK-NEXT:    fminnmv d0, p0, z0.d
 ; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
 ; CHECK-NEXT:    ret
-  %op = load <4 x double>, <4 x double>* %a
+  %op = load <4 x double>, ptr %a
   %res = call double @llvm.vector.reduce.fmin.v4f64(<4 x double> %op)
+  ret double %res
+}
+
+;
+; FMAXV
+;
+
+define half @fmaximumv_v4f16(<4 x half> %a) #0 {
+; CHECK-LABEL: fmaximumv_v4f16:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $d0 killed $d0 def $z0
+; CHECK-NEXT:    ptrue p0.h, vl4
+; CHECK-NEXT:    fmaxv h0, p0, z0.h
+; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call half @llvm.vector.reduce.fmaximum.v4f16(<4 x half> %a)
+  ret half %res
+}
+
+define half @fmaximumv_v8f16(<8 x half> %a) #0 {
+; CHECK-LABEL: fmaximumv_v8f16:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $q0 killed $q0 def $z0
+; CHECK-NEXT:    ptrue p0.h, vl8
+; CHECK-NEXT:    fmaxv h0, p0, z0.h
+; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call half @llvm.vector.reduce.fmaximum.v8f16(<8 x half> %a)
+  ret half %res
+}
+
+define half @fmaximumv_v16f16(ptr %a) #0 {
+; CHECK-LABEL: fmaximumv_v16f16:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    ldp q1, q0, [x0]
+; CHECK-NEXT:    ptrue p0.h, vl8
+; CHECK-NEXT:    fmax z0.h, p0/m, z0.h, z1.h
+; CHECK-NEXT:    fmaxv h0, p0, z0.h
+; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
+; CHECK-NEXT:    ret
+  %op = load <16 x half>, ptr %a
+  %res = call half @llvm.vector.reduce.fmaximum.v16f16(<16 x half> %op)
+  ret half %res
+}
+
+define float @fmaximumv_v2f32(<2 x float> %a) #0 {
+; CHECK-LABEL: fmaximumv_v2f32:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $d0 killed $d0 def $z0
+; CHECK-NEXT:    ptrue p0.s, vl2
+; CHECK-NEXT:    fmaxv s0, p0, z0.s
+; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call float @llvm.vector.reduce.fmaximum.v2f32(<2 x float> %a)
+  ret float %res
+}
+
+define float @fmaximumv_v4f32(<4 x float> %a) #0 {
+; CHECK-LABEL: fmaximumv_v4f32:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $q0 killed $q0 def $z0
+; CHECK-NEXT:    ptrue p0.s, vl4
+; CHECK-NEXT:    fmaxv s0, p0, z0.s
+; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call float @llvm.vector.reduce.fmaximum.v4f32(<4 x float> %a)
+  ret float %res
+}
+
+define float @fmaximumv_v8f32(ptr %a) #0 {
+; CHECK-LABEL: fmaximumv_v8f32:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    ldp q1, q0, [x0]
+; CHECK-NEXT:    ptrue p0.s, vl4
+; CHECK-NEXT:    fmax z0.s, p0/m, z0.s, z1.s
+; CHECK-NEXT:    fmaxv s0, p0, z0.s
+; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
+; CHECK-NEXT:    ret
+  %op = load <8 x float>, ptr %a
+  %res = call float @llvm.vector.reduce.fmaximum.v8f32(<8 x float> %op)
+  ret float %res
+}
+
+define double @fmaximumv_v1f64(<1 x double> %a) #0 {
+; CHECK-LABEL: fmaximumv_v1f64:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $d0 killed $d0 def $z0
+; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call double @llvm.vector.reduce.fmaximum.v1f64(<1 x double> %a)
+  ret double %res
+}
+
+define double @fmaximumv_v2f64(<2 x double> %a) #0 {
+; CHECK-LABEL: fmaximumv_v2f64:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $q0 killed $q0 def $z0
+; CHECK-NEXT:    ptrue p0.d, vl2
+; CHECK-NEXT:    fmaxv d0, p0, z0.d
+; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call double @llvm.vector.reduce.fmaximum.v2f64(<2 x double> %a)
+  ret double %res
+}
+
+define double @fmaximumv_v4f64(ptr %a) #0 {
+; CHECK-LABEL: fmaximumv_v4f64:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    ldp q1, q0, [x0]
+; CHECK-NEXT:    ptrue p0.d, vl2
+; CHECK-NEXT:    fmax z0.d, p0/m, z0.d, z1.d
+; CHECK-NEXT:    fmaxv d0, p0, z0.d
+; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
+; CHECK-NEXT:    ret
+  %op = load <4 x double>, ptr %a
+  %res = call double @llvm.vector.reduce.fmaximum.v4f64(<4 x double> %op)
+  ret double %res
+}
+
+;
+; FMINV
+;
+
+define half @fminimumv_v4f16(<4 x half> %a) #0 {
+; CHECK-LABEL: fminimumv_v4f16:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $d0 killed $d0 def $z0
+; CHECK-NEXT:    ptrue p0.h, vl4
+; CHECK-NEXT:    fminv h0, p0, z0.h
+; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call half @llvm.vector.reduce.fminimum.v4f16(<4 x half> %a)
+  ret half %res
+}
+
+define half @fminimumv_v8f16(<8 x half> %a) #0 {
+; CHECK-LABEL: fminimumv_v8f16:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $q0 killed $q0 def $z0
+; CHECK-NEXT:    ptrue p0.h, vl8
+; CHECK-NEXT:    fminv h0, p0, z0.h
+; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call half @llvm.vector.reduce.fminimum.v8f16(<8 x half> %a)
+  ret half %res
+}
+
+define half @fminimumv_v16f16(ptr %a) #0 {
+; CHECK-LABEL: fminimumv_v16f16:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    ldp q1, q0, [x0]
+; CHECK-NEXT:    ptrue p0.h, vl8
+; CHECK-NEXT:    fmin z0.h, p0/m, z0.h, z1.h
+; CHECK-NEXT:    fminv h0, p0, z0.h
+; CHECK-NEXT:    // kill: def $h0 killed $h0 killed $z0
+; CHECK-NEXT:    ret
+  %op = load <16 x half>, ptr %a
+  %res = call half @llvm.vector.reduce.fminimum.v16f16(<16 x half> %op)
+  ret half %res
+}
+
+define float @fminimumv_v2f32(<2 x float> %a) #0 {
+; CHECK-LABEL: fminimumv_v2f32:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $d0 killed $d0 def $z0
+; CHECK-NEXT:    ptrue p0.s, vl2
+; CHECK-NEXT:    fminv s0, p0, z0.s
+; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call float @llvm.vector.reduce.fminimum.v2f32(<2 x float> %a)
+  ret float %res
+}
+
+define float @fminimumv_v4f32(<4 x float> %a) #0 {
+; CHECK-LABEL: fminimumv_v4f32:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $q0 killed $q0 def $z0
+; CHECK-NEXT:    ptrue p0.s, vl4
+; CHECK-NEXT:    fminv s0, p0, z0.s
+; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call float @llvm.vector.reduce.fminimum.v4f32(<4 x float> %a)
+  ret float %res
+}
+
+define float @fminimumv_v8f32(ptr %a) #0 {
+; CHECK-LABEL: fminimumv_v8f32:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    ldp q1, q0, [x0]
+; CHECK-NEXT:    ptrue p0.s, vl4
+; CHECK-NEXT:    fmin z0.s, p0/m, z0.s, z1.s
+; CHECK-NEXT:    fminv s0, p0, z0.s
+; CHECK-NEXT:    // kill: def $s0 killed $s0 killed $z0
+; CHECK-NEXT:    ret
+  %op = load <8 x float>, ptr %a
+  %res = call float @llvm.vector.reduce.fminimum.v8f32(<8 x float> %op)
+  ret float %res
+}
+
+define double @fminimumv_v1f64(<1 x double> %a) #0 {
+; CHECK-LABEL: fminimumv_v1f64:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $d0 killed $d0 def $z0
+; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call double @llvm.vector.reduce.fminimum.v1f64(<1 x double> %a)
+  ret double %res
+}
+
+define double @fminimumv_v2f64(<2 x double> %a) #0 {
+; CHECK-LABEL: fminimumv_v2f64:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    // kill: def $q0 killed $q0 def $z0
+; CHECK-NEXT:    ptrue p0.d, vl2
+; CHECK-NEXT:    fminv d0, p0, z0.d
+; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
+; CHECK-NEXT:    ret
+  %res = call double @llvm.vector.reduce.fminimum.v2f64(<2 x double> %a)
+  ret double %res
+}
+
+define double @fminimumv_v4f64(ptr %a) #0 {
+; CHECK-LABEL: fminimumv_v4f64:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    ldp q1, q0, [x0]
+; CHECK-NEXT:    ptrue p0.d, vl2
+; CHECK-NEXT:    fmin z0.d, p0/m, z0.d, z1.d
+; CHECK-NEXT:    fminv d0, p0, z0.d
+; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $z0
+; CHECK-NEXT:    ret
+  %op = load <4 x double>, ptr %a
+  %res = call double @llvm.vector.reduce.fminimum.v4f64(<4 x double> %op)
   ret double %res
 }
 
@@ -512,3 +744,27 @@ declare float @llvm.vector.reduce.fmin.v8f32(<8 x float>)
 declare double @llvm.vector.reduce.fmin.v1f64(<1 x double>)
 declare double @llvm.vector.reduce.fmin.v2f64(<2 x double>)
 declare double @llvm.vector.reduce.fmin.v4f64(<4 x double>)
+
+declare half @llvm.vector.reduce.fmaximum.v4f16(<4 x half>)
+declare half @llvm.vector.reduce.fmaximum.v8f16(<8 x half>)
+declare half @llvm.vector.reduce.fmaximum.v16f16(<16 x half>)
+
+declare float @llvm.vector.reduce.fmaximum.v2f32(<2 x float>)
+declare float @llvm.vector.reduce.fmaximum.v4f32(<4 x float>)
+declare float @llvm.vector.reduce.fmaximum.v8f32(<8 x float>)
+
+declare double @llvm.vector.reduce.fmaximum.v1f64(<1 x double>)
+declare double @llvm.vector.reduce.fmaximum.v2f64(<2 x double>)
+declare double @llvm.vector.reduce.fmaximum.v4f64(<4 x double>)
+
+declare half @llvm.vector.reduce.fminimum.v4f16(<4 x half>)
+declare half @llvm.vector.reduce.fminimum.v8f16(<8 x half>)
+declare half @llvm.vector.reduce.fminimum.v16f16(<16 x half>)
+
+declare float @llvm.vector.reduce.fminimum.v2f32(<2 x float>)
+declare float @llvm.vector.reduce.fminimum.v4f32(<4 x float>)
+declare float @llvm.vector.reduce.fminimum.v8f32(<8 x float>)
+
+declare double @llvm.vector.reduce.fminimum.v1f64(<1 x double>)
+declare double @llvm.vector.reduce.fminimum.v2f64(<2 x double>)
+declare double @llvm.vector.reduce.fminimum.v4f64(<4 x double>)

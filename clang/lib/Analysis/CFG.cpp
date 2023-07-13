@@ -40,7 +40,6 @@
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -56,6 +55,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -436,8 +436,8 @@ reverse_children::reverse_children(Stmt *S) {
     // Note: Fill in this switch with more cases we want to optimize.
     case Stmt::InitListExprClass: {
       InitListExpr *IE = cast<InitListExpr>(S);
-      children = llvm::makeArrayRef(reinterpret_cast<Stmt**>(IE->getInits()),
-                                    IE->getNumInits());
+      children = llvm::ArrayRef(reinterpret_cast<Stmt **>(IE->getInits()),
+                                IE->getNumInits());
       return;
     }
     default:
@@ -968,7 +968,7 @@ private:
     const Expr *LHSExpr = B->getLHS()->IgnoreParens();
     const Expr *RHSExpr = B->getRHS()->IgnoreParens();
 
-    Optional<llvm::APInt> IntLiteral1 =
+    std::optional<llvm::APInt> IntLiteral1 =
         getIntegerLiteralSubexpressionValue(LHSExpr);
     const Expr *BoolExpr = RHSExpr;
 
@@ -986,7 +986,7 @@ private:
       const Expr *LHSExpr2 = BitOp->getLHS()->IgnoreParens();
       const Expr *RHSExpr2 = BitOp->getRHS()->IgnoreParens();
 
-      Optional<llvm::APInt> IntLiteral2 =
+      std::optional<llvm::APInt> IntLiteral2 =
           getIntegerLiteralSubexpressionValue(LHSExpr2);
 
       if (!IntLiteral2)
@@ -1020,7 +1020,8 @@ private:
   // FIXME: it would be good to unify this function with
   // IsIntegerLiteralConstantExpr at some point given the similarity between the
   // functions.
-  Optional<llvm::APInt> getIntegerLiteralSubexpressionValue(const Expr *E) {
+  std::optional<llvm::APInt>
+  getIntegerLiteralSubexpressionValue(const Expr *E) {
 
     // If unary.
     if (const auto *UnOp = dyn_cast<UnaryOperator>(E->IgnoreParens())) {
@@ -1991,8 +1992,7 @@ LocalScope* CFGBuilder::createOrReuseLocalScope(LocalScope* Scope) {
   if (Scope)
     return Scope;
   llvm::BumpPtrAllocator &alloc = cfg->getAllocator();
-  return new (alloc.Allocate<LocalScope>())
-      LocalScope(BumpVectorContext(alloc), ScopePos);
+  return new (alloc) LocalScope(BumpVectorContext(alloc), ScopePos);
 }
 
 /// addLocalScopeForStmt - Add LocalScope to local scopes tree for statement
@@ -2252,8 +2252,7 @@ CFGBlock *CFGBuilder::Visit(Stmt * S, AddStmtChoice asc,
       // FIXME: The expression inside a CXXDefaultArgExpr is owned by the
       // called function's declaration, not by the caller. If we simply add
       // this expression to the CFG, we could end up with the same Expr
-      // appearing multiple times.
-      // PR13385 / <rdar://problem/12156507>
+      // appearing multiple times. PR13385
       //
       // It's likewise possible for multiple CXXDefaultInitExprs for the same
       // expression to be used in the same function (through aggregate
@@ -3386,8 +3385,7 @@ CFGBlock *CFGBuilder::VisitLabelStmt(LabelStmt *L) {
   if (!LabelBlock)              // This can happen when the body is empty, i.e.
     LabelBlock = createBlock(); // scopes that only contains NullStmts.
 
-  assert(LabelMap.find(L->getDecl()) == LabelMap.end() &&
-         "label already in map");
+  assert(!LabelMap.contains(L->getDecl()) && "label already in map");
   LabelMap[L->getDecl()] = JumpTarget(LabelBlock, ScopePos);
 
   // Labels partition blocks, so this is the end of the basic block we were
@@ -4154,7 +4152,7 @@ CFGBlock *CFGBuilder::VisitCXXTypeidExpr(CXXTypeidExpr *S, AddStmtChoice asc) {
   //   operand. [...]
   // We add only potentially evaluated statements to the block to avoid
   // CFG generation for unevaluated operands.
-  if (S && !S->isTypeDependent() && S->isPotentiallyEvaluated())
+  if (!S->isTypeDependent() && S->isPotentiallyEvaluated())
     return VisitChildren(S);
 
   // Return block without CFG for unevaluated operands.
@@ -5214,8 +5212,7 @@ CFGBlock *CFG::createBlock() {
   bool first_block = begin() == end();
 
   // Create the block.
-  CFGBlock *Mem = getAllocator().Allocate<CFGBlock>();
-  new (Mem) CFGBlock(NumBlockIDs++, BlkBVC, this);
+  CFGBlock *Mem = new (getAllocator()) CFGBlock(NumBlockIDs++, BlkBVC, this);
   Blocks.push_back(Mem, BlkBVC);
 
   // If this is the first block, set it as the Entry and Exit.
@@ -5422,7 +5419,7 @@ public:
       unsigned j = 1;
       for (CFGBlock::const_iterator BI = (*I)->begin(), BEnd = (*I)->end() ;
            BI != BEnd; ++BI, ++j ) {
-        if (Optional<CFGStmt> SE = BI->getAs<CFGStmt>()) {
+        if (std::optional<CFGStmt> SE = BI->getAs<CFGStmt>()) {
           const Stmt *stmt= SE->getStmt();
           std::pair<unsigned, unsigned> P((*I)->getBlockID(), j);
           StmtMap[stmt] = P;
@@ -5747,7 +5744,8 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper &Helper,
                        const CFGElement &E);
 
 void CFGElement::dumpToStream(llvm::raw_ostream &OS) const {
-  StmtPrinterHelper Helper(nullptr, {});
+  LangOptions LangOpts;
+  StmtPrinterHelper Helper(nullptr, LangOpts);
   print_elem(OS, Helper, *this);
 }
 
@@ -5796,7 +5794,7 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper &Helper,
       OS << " (BindTemporary)";
     } else if (const CXXConstructExpr *CCE = dyn_cast<CXXConstructExpr>(S)) {
       OS << " (CXXConstructExpr";
-      if (Optional<CFGConstructor> CE = E.getAs<CFGConstructor>()) {
+      if (std::optional<CFGConstructor> CE = E.getAs<CFGConstructor>()) {
         print_construction_context(OS, Helper, CE->getConstructionContext());
       }
       OS << ", " << CCE->getType() << ")";
@@ -6171,7 +6169,7 @@ static bool isImmediateSinkBlock(const CFGBlock *Blk) {
   // we'd need to carefully handle the case when the throw is being
   // immediately caught.
   if (llvm::any_of(*Blk, [](const CFGElement &Elm) {
-        if (Optional<CFGStmt> StmtElm = Elm.getAs<CFGStmt>())
+        if (std::optional<CFGStmt> StmtElm = Elm.getAs<CFGStmt>())
           if (isa<CXXThrowExpr>(StmtElm->getStmt()))
             return true;
         return false;

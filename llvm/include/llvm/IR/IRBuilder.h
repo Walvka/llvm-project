@@ -16,7 +16,6 @@
 
 #include "llvm-c/Types.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -66,7 +65,8 @@ public:
   virtual void InsertHelper(Instruction *I, const Twine &Name,
                             BasicBlock *BB,
                             BasicBlock::iterator InsertPt) const {
-    if (BB) BB->getInstList().insert(InsertPt, I);
+    if (BB)
+      I->insertInto(BB, InsertPt);
     I->setName(Name);
   }
 };
@@ -567,6 +567,12 @@ public:
     return DL.getIntPtrType(Context, AddrSpace);
   }
 
+  /// Fetch the type of an integer that should be used to index GEP operations
+  /// within AddressSpace.
+  IntegerType *getIndexTy(const DataLayout &DL, unsigned AddrSpace) {
+    return DL.getIndexType(Context, AddrSpace);
+  }
+
   //===--------------------------------------------------------------------===//
   // Intrinsic creation methods
   //===--------------------------------------------------------------------===//
@@ -750,6 +756,16 @@ public:
   /// vector.
   CallInst *CreateFPMinReduce(Value *Src);
 
+  /// Create a vector float maximum reduction intrinsic of the source
+  /// vector. This variant follows the NaN and signed zero semantic of
+  /// llvm.maximum intrinsic.
+  CallInst *CreateFPMaximumReduce(Value *Src);
+
+  /// Create a vector float minimum reduction intrinsic of the source
+  /// vector. This variant follows the NaN and signed zero semantic of
+  /// llvm.minimum intrinsic.
+  CallInst *CreateFPMinimumReduce(Value *Src);
+
   /// Create a lifetime.start intrinsic.
   ///
   /// If the pointer isn't i8* it will be converted.
@@ -794,6 +810,12 @@ public:
   CallInst *CreateMaskedCompressStore(Value *Val, Value *Ptr,
                                       Value *Mask = nullptr);
 
+  /// Return an all true boolean vector (mask) with \p NumElts lanes.
+  Value *getAllOnesMask(ElementCount NumElts) {
+    VectorType *VTy = VectorType::get(Type::getInt1Ty(Context), NumElts);
+    return Constant::getAllOnesValue(VTy);
+  }
+
   /// Create an assume intrinsic call that allows the optimizer to
   /// assume that the provided condition will be true.
   ///
@@ -830,7 +852,7 @@ public:
                                    const Twine &Name = "");
 
   /// Conveninence function for the common case when CallArgs are filled
-  /// in using makeArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be
+  /// in using ArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be
   /// .get()'ed to get the Value pointer.
   CallInst *CreateGCStatepointCall(uint64_t ID, uint32_t NumPatchBytes,
                                    FunctionCallee ActualCallee,
@@ -858,7 +880,7 @@ public:
       const Twine &Name = "");
 
   // Convenience function for the common case when CallArgs are filled in using
-  // makeArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be .get()'ed to
+  // ArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be .get()'ed to
   // get the Value *.
   InvokeInst *
   CreateGCStatepointInvoke(uint64_t ID, uint32_t NumPatchBytes,
@@ -893,6 +915,14 @@ public:
   /// will be the same type as that of \p Scaling.
   Value *CreateVScale(Constant *Scaling, const Twine &Name = "");
 
+  /// Create an expression which evaluates to the number of elements in \p EC
+  /// at runtime.
+  Value *CreateElementCount(Type *DstType, ElementCount EC);
+
+  /// Create an expression which evaluates to the number of units in \p Size
+  /// at runtime.  This works for both units of bits and bytes.
+  Value *CreateTypeSize(Type *DstType, TypeSize Size);
+
   /// Creates a vector of type \p DstType with the linear sequence <0, 1, ...>
   Value *CreateStepVector(Type *DstType, const Twine &Name = "");
 
@@ -926,11 +956,21 @@ public:
 
   /// Create call to the minnum intrinsic.
   CallInst *CreateMinNum(Value *LHS, Value *RHS, const Twine &Name = "") {
+    if (IsFPConstrained) {
+      return CreateConstrainedFPUnroundedBinOp(
+          Intrinsic::experimental_constrained_minnum, LHS, RHS, nullptr, Name);
+    }
+
     return CreateBinaryIntrinsic(Intrinsic::minnum, LHS, RHS, nullptr, Name);
   }
 
   /// Create call to the maxnum intrinsic.
   CallInst *CreateMaxNum(Value *LHS, Value *RHS, const Twine &Name = "") {
+    if (IsFPConstrained) {
+      return CreateConstrainedFPUnroundedBinOp(
+          Intrinsic::experimental_constrained_maxnum, LHS, RHS, nullptr, Name);
+    }
+
     return CreateBinaryIntrinsic(Intrinsic::maxnum, LHS, RHS, nullptr, Name);
   }
 
@@ -942,6 +982,14 @@ public:
   /// Create call to the maximum intrinsic.
   CallInst *CreateMaximum(Value *LHS, Value *RHS, const Twine &Name = "") {
     return CreateBinaryIntrinsic(Intrinsic::maximum, LHS, RHS, nullptr, Name);
+  }
+
+  /// Create call to the copysign intrinsic.
+  CallInst *CreateCopySign(Value *LHS, Value *RHS,
+                           Instruction *FMFSource = nullptr,
+                           const Twine &Name = "") {
+    return CreateBinaryIntrinsic(Intrinsic::copysign, LHS, RHS, FMFSource,
+                                 Name);
   }
 
   /// Create a call to the arithmetic_fence intrinsic.
@@ -1039,7 +1087,7 @@ public:
     if (MDSrc) {
       unsigned WL[4] = {LLVMContext::MD_prof, LLVMContext::MD_unpredictable,
                         LLVMContext::MD_make_implicit, LLVMContext::MD_dbg};
-      Br->copyMetadata(*MDSrc, makeArrayRef(&WL[0], 4));
+      Br->copyMetadata(*MDSrc, WL);
     }
     return Insert(Br);
   }
@@ -1199,26 +1247,21 @@ private:
     RoundingMode UseRounding = DefaultConstrainedRounding;
 
     if (Rounding)
-      UseRounding = Rounding.value();
+      UseRounding = *Rounding;
 
     std::optional<StringRef> RoundingStr =
         convertRoundingModeToStr(UseRounding);
     assert(RoundingStr && "Garbage strict rounding mode!");
-    auto *RoundingMDS = MDString::get(Context, RoundingStr.value());
+    auto *RoundingMDS = MDString::get(Context, *RoundingStr);
 
     return MetadataAsValue::get(Context, RoundingMDS);
   }
 
   Value *getConstrainedFPExcept(std::optional<fp::ExceptionBehavior> Except) {
-    fp::ExceptionBehavior UseExcept = DefaultConstrainedExcept;
-
-    if (Except)
-      UseExcept = Except.value();
-
-    std::optional<StringRef> ExceptStr =
-        convertExceptionBehaviorToStr(UseExcept);
+    std::optional<StringRef> ExceptStr = convertExceptionBehaviorToStr(
+        Except.value_or(DefaultConstrainedExcept));
     assert(ExceptStr && "Garbage strict exception behavior!");
-    auto *ExceptMDS = MDString::get(Context, ExceptStr.value());
+    auto *ExceptMDS = MDString::get(Context, *ExceptStr);
 
     return MetadataAsValue::get(Context, ExceptMDS);
   }
@@ -1543,6 +1586,7 @@ public:
       return CreateConstrainedFPBinOp(Intrinsic::experimental_constrained_fdiv,
                                       L, R, FMFSource, Name);
 
+    FastMathFlags FMF = FMFSource->getFastMathFlags();
     if (Value *V = Folder.FoldBinOpFMF(Instruction::FDiv, L, R, FMF))
       return V;
     Instruction *I = setFPAttrs(BinaryOperator::CreateFDiv(L, R), nullptr, FMF);
@@ -1596,6 +1640,19 @@ public:
                         Cond2, Name);
   }
 
+  Value *CreateLogicalOp(Instruction::BinaryOps Opc, Value *Cond1, Value *Cond2,
+                         const Twine &Name = "") {
+    switch (Opc) {
+    case Instruction::And:
+      return CreateLogicalAnd(Cond1, Cond2, Name);
+    case Instruction::Or:
+      return CreateLogicalOr(Cond1, Cond2, Name);
+    default:
+      break;
+    }
+    llvm_unreachable("Not a logical operation.");
+  }
+
   // NOTE: this is sequential, non-commutative, ordered reduction!
   Value *CreateLogicalOr(ArrayRef<Value *> Ops) {
     assert(!Ops.empty());
@@ -1609,6 +1666,11 @@ public:
       Intrinsic::ID ID, Value *L, Value *R, Instruction *FMFSource = nullptr,
       const Twine &Name = "", MDNode *FPMathTag = nullptr,
       std::optional<RoundingMode> Rounding = std::nullopt,
+      std::optional<fp::ExceptionBehavior> Except = std::nullopt);
+
+  CallInst *CreateConstrainedFPUnroundedBinOp(
+      Intrinsic::ID ID, Value *L, Value *R, Instruction *FMFSource = nullptr,
+      const Twine &Name = "", MDNode *FPMathTag = nullptr,
       std::optional<fp::ExceptionBehavior> Except = std::nullopt);
 
   Value *CreateNeg(Value *V, const Twine &Name = "", bool HasNUW = false,
@@ -2406,12 +2468,12 @@ public:
 
   /// Return a boolean value testing if \p Arg == 0.
   Value *CreateIsNull(Value *Arg, const Twine &Name = "") {
-    return CreateICmpEQ(Arg, ConstantInt::getNullValue(Arg->getType()), Name);
+    return CreateICmpEQ(Arg, Constant::getNullValue(Arg->getType()), Name);
   }
 
   /// Return a boolean value testing if \p Arg != 0.
   Value *CreateIsNotNull(Value *Arg, const Twine &Name = "") {
-    return CreateICmpNE(Arg, ConstantInt::getNullValue(Arg->getType()), Name);
+    return CreateICmpNE(Arg, Constant::getNullValue(Arg->getType()), Name);
   }
 
   /// Return a boolean value testing if \p Arg < 0.
@@ -2480,6 +2542,8 @@ public:
   Value *CreatePreserveStructAccessIndex(Type *ElTy, Value *Base,
                                          unsigned Index, unsigned FieldIndex,
                                          MDNode *DbgInfo);
+
+  Value *createIsFPClass(Value *FPNum, unsigned Test);
 
 private:
   /// Helper function that creates an assume intrinsic call that

@@ -13,6 +13,7 @@
 #ifndef LLVM_CLANG_AST_INTERP_SOURCE_H
 #define LLVM_CLANG_AST_INTERP_SOURCE_H
 
+#include "PrimType.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Stmt.h"
 #include "llvm/Support/Endian.h"
@@ -47,19 +48,17 @@ public:
 
   /// Reads data and advances the pointer.
   template <typename T> std::enable_if_t<!std::is_pointer<T>::value, T> read() {
+    assert(aligned(Ptr));
     using namespace llvm::support;
     T Value = endian::read<T, endianness::native, 1>(Ptr);
-    Ptr += sizeof(T);
+    Ptr += align(sizeof(T));
     return Value;
   }
 
 private:
+  friend class Function;
   /// Constructor used by Function to generate pointers.
   CodePtr(const char *Ptr) : Ptr(Ptr) {}
-
-private:
-  friend class Function;
-
   /// Pointer into the code owned by a function.
   const char *Ptr;
 };

@@ -21,14 +21,14 @@ using namespace mlir;
 //===----------------------------------------------------------------------===//
 
 static bool isEmptyAttrDict(Attribute attr) {
-  return attr.cast<DictionaryAttr>().empty();
+  return llvm::cast<DictionaryAttr>(attr).empty();
 }
 
 DictionaryAttr function_interface_impl::getArgAttrDict(FunctionOpInterface op,
                                                        unsigned index) {
   ArrayAttr attrs = op.getArgAttrsAttr();
   DictionaryAttr argAttrs =
-      attrs ? attrs[index].cast<DictionaryAttr>() : DictionaryAttr();
+      attrs ? llvm::cast<DictionaryAttr>(attrs[index]) : DictionaryAttr();
   return argAttrs;
 }
 
@@ -37,7 +37,7 @@ function_interface_impl::getResultAttrDict(FunctionOpInterface op,
                                            unsigned index) {
   ArrayAttr attrs = op.getResAttrsAttr();
   DictionaryAttr resAttrs =
-      attrs ? attrs[index].cast<DictionaryAttr>() : DictionaryAttr();
+      attrs ? llvm::cast<DictionaryAttr>(attrs[index]) : DictionaryAttr();
   return resAttrs;
 }
 
@@ -288,7 +288,7 @@ void function_interface_impl::eraseFunctionArguments(
     newArgAttrs.reserve(argAttrs.size());
     for (unsigned i = 0, e = argIndices.size(); i < e; ++i)
       if (!argIndices[i])
-        newArgAttrs.emplace_back(argAttrs[i].cast<DictionaryAttr>());
+        newArgAttrs.emplace_back(llvm::cast<DictionaryAttr>(argAttrs[i]));
     setAllArgAttrDicts(op, newArgAttrs);
   }
 
@@ -309,7 +309,7 @@ void function_interface_impl::eraseFunctionResults(
     newResultAttrs.reserve(resAttrs.size());
     for (unsigned i = 0, e = resultIndices.size(); i < e; ++i)
       if (!resultIndices[i])
-        newResultAttrs.emplace_back(resAttrs[i].cast<DictionaryAttr>());
+        newResultAttrs.emplace_back(llvm::cast<DictionaryAttr>(resAttrs[i]));
     setAllResultAttrDicts(op, newResultAttrs);
   }
 
@@ -360,6 +360,7 @@ void function_interface_impl::setFunctionType(FunctionOpInterface op,
   unsigned newNumResults = op.getNumResults();
 
   // Functor used to update the argument and result attributes of the function.
+  auto emptyDict = DictionaryAttr::get(op.getContext());
   auto updateAttrFn = [&](auto isArg, unsigned oldCount, unsigned newCount) {
     constexpr bool isArgVal = std::is_same_v<decltype(isArg), std::true_type>;
 
@@ -378,9 +379,9 @@ void function_interface_impl::setFunctionType(FunctionOpInterface op,
           op, attrs.getValue().take_front(newCount));
 
     // Otherwise, the new type has more arguments/results. Initialize the new
-    // arguments/results with empty attributes.
+    // arguments/results with empty dictionary attributes.
     SmallVector<Attribute> newAttrs(attrs.begin(), attrs.end());
-    newAttrs.resize(newCount);
+    newAttrs.resize(newCount, emptyDict);
     setAllArgResAttrDicts<isArgVal>(op, newAttrs);
   };
 

@@ -7,6 +7,7 @@ add_header_library(
   DEPENDS
     libc.include.stdlib
     libc.src.__support.CPP.bitset
+    libc.src.__support.common
     .memory_utils.memcpy_implementation
     .memory_utils.bzero_implementation
 )
@@ -16,8 +17,10 @@ add_header_library(
   HDRS
     allocating_string_utils.h
   DEPENDS
-    libc.include.stdlib
     .memory_utils.memcpy_implementation
+    libc.include.stdlib
+    libc.src.__support.CPP.optional
+    libc.src.__support.macros.config
 )
 
 add_entrypoint_object(
@@ -26,6 +29,16 @@ add_entrypoint_object(
     bcopy.cpp
   HDRS
     bcopy.h
+)
+
+add_entrypoint_object(
+  index
+  SRCS
+    index.cpp
+  HDRS
+    index.h
+  DEPENDS
+    .string_utils
 )
 
 add_entrypoint_object(
@@ -47,6 +60,16 @@ add_entrypoint_object(
 )
 
 add_entrypoint_object(
+  memmem
+  SRCS
+    memmem.cpp
+  HDRS
+    memmem.h
+  DEPENDS
+    .memory_utils.memmem_implementation
+)
+
+add_entrypoint_object(
   memchr
   SRCS
     memchr.cpp
@@ -62,6 +85,16 @@ add_entrypoint_object(
     memrchr.cpp
   HDRS
     memrchr.h
+)
+
+add_entrypoint_object(
+  rindex
+  SRCS
+    rindex.cpp
+  HDRS
+    rindex.h
+  DEPENDS
+    .string_utils
 )
 
 add_entrypoint_object(
@@ -102,6 +135,18 @@ add_entrypoint_object(
     strchr.cpp
   HDRS
     strchr.h
+  DEPENDS
+    .string_utils
+)
+
+add_entrypoint_object(
+  strchrnul
+  SRCS
+    strchrnul.cpp
+  HDRS
+    strchrnul.h
+  DEPENDS
+    .string_utils
 )
 
 add_entrypoint_object(
@@ -110,6 +155,30 @@ add_entrypoint_object(
     strcmp.cpp
   HDRS
     strcmp.h
+  DEPENDS
+    .memory_utils.strcmp_implementation
+)
+
+add_entrypoint_object(
+  strcasecmp
+  SRCS
+    strcasecmp.cpp
+  HDRS
+    strcasecmp.h
+  DEPENDS
+    .memory_utils.strcmp_implementation
+    libc.src.__support.ctype_utils
+)
+
+add_entrypoint_object(
+  strcasestr
+  SRCS
+    strcasestr.cpp
+  HDRS
+    strcasestr.h
+  DEPENDS
+    .memory_utils.strstr_implementation
+    libc.src.__support.ctype_utils
 )
 
 add_entrypoint_object(
@@ -151,6 +220,7 @@ add_entrypoint_object(
     .memory_utils.memcpy_implementation
     .string_utils
     libc.include.stdlib
+    libc.src.errno.errno
 )
 
 add_entrypoint_object(
@@ -223,6 +293,19 @@ add_entrypoint_object(
     strncmp.cpp
   HDRS
     strncmp.h
+  DEPENDS
+    .memory_utils.strcmp_implementation
+)
+
+add_entrypoint_object(
+  strncasecmp
+  SRCS
+    strncasecmp.cpp
+  HDRS
+    strncasecmp.h
+  DEPENDS
+    .memory_utils.strcmp_implementation
+    libc.src.__support.ctype_utils
 )
 
 add_entrypoint_object(
@@ -243,6 +326,7 @@ add_entrypoint_object(
     .memory_utils.memcpy_implementation
     .string_utils
     libc.include.stdlib
+    libc.src.__support.CPP.new
 )
 
 add_entrypoint_object(
@@ -271,6 +355,18 @@ add_entrypoint_object(
     strrchr.cpp
   HDRS
     strrchr.h
+  DEPENDS
+    .string_utils
+)
+
+add_entrypoint_object(
+  strsep
+  SRCS
+    strsep.cpp
+  HDRS
+    strsep.h
+  DEPENDS
+    .string_utils
 )
 
 add_entrypoint_object(
@@ -299,6 +395,8 @@ add_entrypoint_object(
     strstr.cpp
   HDRS
     strstr.h
+  DEPENDS
+    .memory_utils.strstr_implementation
 )
 
 add_entrypoint_object(
@@ -321,6 +419,17 @@ add_entrypoint_object(
     .string_utils
 )
 
+add_entrypoint_object(
+  strxfrm
+  SRCS
+    strxfrm.cpp
+  HDRS
+    strxfrm.h
+  DEPENDS
+    .string_utils
+    .memory_utils.memcpy_implementation
+)
+
 # Helper to define a function with multiple implementations
 # - Computes flags to satisfy required/rejected features and arch,
 # - Declares an entry point,
@@ -341,12 +450,18 @@ function(add_implementation name impl_name)
     endforeach()
   endif()
 
+  if("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU")
+    # Prevent warning when passing x86 SIMD types as template arguments.
+    # e.g. "warning: ignoring attributes on template argument ‘__m128i’ [-Wignored-attributes]"
+    list(APPEND ADD_IMPL_COMPILE_OPTIONS "-Wno-ignored-attributes")
+  endif()
+
   add_entrypoint_object(${impl_name}
     NAME ${name}
     SRCS ${ADD_IMPL_SRCS}
     HDRS ${ADD_IMPL_HDRS}
     DEPENDS ${ADD_IMPL_DEPENDS}
-    COMPILE_OPTIONS ${ADD_IMPL_COMPILE_OPTIONS}
+    COMPILE_OPTIONS -O3 ${ADD_IMPL_COMPILE_OPTIONS}
   )
   get_fq_target_name(${impl_name} fq_target_name)
   set_target_properties(${fq_target_name} PROPERTIES REQUIRE_CPU_FEATURES "${ADD_IMPL_REQUIRE}")
@@ -455,8 +570,10 @@ endfunction()
 if(${LIBC_TARGET_ARCHITECTURE_IS_X86})
   add_memcpy(memcpy_x86_64_opt_sse2   COMPILE_OPTIONS -march=k8             REQUIRE SSE2)
   add_memcpy(memcpy_x86_64_opt_sse4   COMPILE_OPTIONS -march=nehalem        REQUIRE SSE4_2)
-  add_memcpy(memcpy_x86_64_opt_avx2   COMPILE_OPTIONS -march=haswell        REQUIRE AVX2)
+  add_memcpy(memcpy_x86_64_opt_avx    COMPILE_OPTIONS -march=sandybridge    REQUIRE AVX)
   add_memcpy(memcpy_x86_64_opt_avx512 COMPILE_OPTIONS -march=skylake-avx512 REQUIRE AVX512F)
+  add_memcpy(memcpy_x86_64_opt_sw_prefetch_sse4   COMPILE_OPTIONS -DLIBC_COPT_MEMCPY_X86_USE_SOFTWARE_PREFETCHING -march=nehalem        REQUIRE SSE4_2)
+  add_memcpy(memcpy_x86_64_opt_sw_prefetch_avx    COMPILE_OPTIONS -DLIBC_COPT_MEMCPY_X86_USE_SOFTWARE_PREFETCHING -march=sandybridge    REQUIRE AVX)
   add_memcpy(memcpy_opt_host          COMPILE_OPTIONS ${LIBC_COMPILE_OPTIONS_NATIVE})
   add_memcpy(memcpy)
 elseif(${LIBC_TARGET_ARCHITECTURE_IS_AARCH64})

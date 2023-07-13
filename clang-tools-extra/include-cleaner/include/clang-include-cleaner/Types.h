@@ -26,9 +26,13 @@
 #include "clang/Tooling/Inclusions/StandardLibrary.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseMapInfoVariant.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
 #include <memory>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace llvm {
@@ -66,12 +70,17 @@ struct Symbol {
 
   const Decl &declaration() const { return *std::get<Declaration>(Storage); }
   struct Macro macro() const { return std::get<Macro>(Storage); }
+  std::string name() const;
 
 private:
   // Order must match Kind enum!
   std::variant<const Decl *, struct Macro> Storage;
 
-  Symbol(decltype(Storage) Sentinel) : Storage(std::move(Sentinel)) {}
+  // Disambiguation tag to make sure we can call the right constructor from
+  // DenseMapInfo methods.
+  struct SentinelTag {};
+  Symbol(SentinelTag, decltype(Storage) Sentinel)
+      : Storage(std::move(Sentinel)) {}
   friend llvm::DenseMapInfo<Symbol>;
 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const Symbol &);
@@ -89,10 +98,10 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &, RefType);
 
 /// Indicates that a piece of code refers to a symbol.
 struct SymbolReference {
-  /// The point in the code that refers to the symbol.
-  SourceLocation RefLocation;
   /// The symbol referred to.
   Symbol Target;
+  /// The point in the code that refers to the symbol.
+  SourceLocation RefLocation;
   /// Relation type between the reference location and the target.
   RefType RT;
 };
@@ -117,6 +126,7 @@ struct Header {
 
   Kind kind() const { return static_cast<Kind>(Storage.index()); }
   bool operator==(const Header &RHS) const { return Storage == RHS.Storage; }
+  bool operator<(const Header &RHS) const;
 
   const FileEntry *physical() const { return std::get<Physical>(Storage); }
   tooling::stdlib::Header standard() const {
@@ -124,9 +134,20 @@ struct Header {
   }
   StringRef verbatim() const { return std::get<Verbatim>(Storage); }
 
+  /// Absolute path for the header when it's a physical file. Otherwise just
+  /// the spelling without surrounding quotes/brackets.
+  llvm::StringRef resolvedPath() const;
+
 private:
   // Order must match Kind enum!
   std::variant<const FileEntry *, tooling::stdlib::Header, StringRef> Storage;
+
+  // Disambiguation tag to make sure we can call the right constructor from
+  // DenseMapInfo methods.
+  struct SentinelTag {};
+  Header(SentinelTag, decltype(Storage) Sentinel)
+      : Storage(std::move(Sentinel)) {}
+  friend llvm::DenseMapInfo<Header>;
 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const Header &);
 
@@ -178,8 +199,12 @@ template <> struct DenseMapInfo<clang::include_cleaner::Symbol> {
   using Outer = clang::include_cleaner::Symbol;
   using Base = DenseMapInfo<decltype(Outer::Storage)>;
 
-  static inline Outer getEmptyKey() { return {Base::getEmptyKey()}; }
-  static inline Outer getTombstoneKey() { return {Base::getTombstoneKey()}; }
+  static inline Outer getEmptyKey() {
+    return {Outer::SentinelTag{}, Base::getEmptyKey()};
+  }
+  static inline Outer getTombstoneKey() {
+    return {Outer::SentinelTag{}, Base::getTombstoneKey()};
+  }
   static unsigned getHashValue(const Outer &Val) {
     return Base::getHashValue(Val.Storage);
   }
@@ -200,6 +225,23 @@ template <> struct DenseMapInfo<clang::include_cleaner::Macro> {
   }
   static bool isEqual(const Outer &LHS, const Outer &RHS) {
     return Base::isEqual(LHS.Definition, RHS.Definition);
+  }
+};
+template <> struct DenseMapInfo<clang::include_cleaner::Header> {
+  using Outer = clang::include_cleaner::Header;
+  using Base = DenseMapInfo<decltype(Outer::Storage)>;
+
+  static inline Outer getEmptyKey() {
+    return {Outer::SentinelTag{}, Base::getEmptyKey()};
+  }
+  static inline Outer getTombstoneKey() {
+    return {Outer::SentinelTag{}, Base::getTombstoneKey()};
+  }
+  static unsigned getHashValue(const Outer &Val) {
+    return Base::getHashValue(Val.Storage);
+  }
+  static bool isEqual(const Outer &LHS, const Outer &RHS) {
+    return Base::isEqual(LHS.Storage, RHS.Storage);
   }
 };
 } // namespace llvm

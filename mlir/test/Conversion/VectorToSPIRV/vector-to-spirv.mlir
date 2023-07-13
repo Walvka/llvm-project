@@ -16,6 +16,23 @@ func.func @bitcast(%arg0 : vector<2xf32>, %arg1: vector<2xf16>) -> (vector<4xf16
 
 // -----
 
+// Check that without the proper capability we fail the pattern application
+// to avoid generating invalid ops.
+
+module attributes { spirv.target_env = #spirv.target_env<#spirv.vce<v1.0, [], []>, #spirv.resource_limits<>> } {
+
+// CHECK-LABEL: @bitcast
+func.func @bitcast(%arg0 : vector<2xf32>, %arg1: vector<2xf16>) -> (vector<4xf16>, vector<1xf32>) {
+  // CHECK-COUNT-2: vector.bitcast
+  %0 = vector.bitcast %arg0 : vector<2xf32> to vector<4xf16>
+  %1 = vector.bitcast %arg1 : vector<2xf16> to vector<1xf32>
+  return %0, %1: vector<4xf16>, vector<1xf32>
+}
+
+} // end module
+
+// -----
+
 module attributes { spirv.target_env = #spirv.target_env<#spirv.vce<v1.0, [Kernel], []>, #spirv.resource_limits<>> } {
 
 // CHECK-LABEL: @cl_fma
@@ -162,6 +179,15 @@ func.func @extract_size1_vector(%arg0 : vector<1xf32>) -> f32 {
 func.func @insert(%arg0 : vector<4xf32>, %arg1: f32) -> vector<4xf32> {
   %1 = vector.insert %arg1, %arg0[2] : f32 into vector<4xf32>
   return %1: vector<4xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @insert_index_vector
+//       CHECK:   spirv.CompositeInsert %{{.+}}, %{{.+}}[2 : i32] : i32 into vector<4xi32>
+func.func @insert_index_vector(%arg0 : vector<4xindex>, %arg1: index) -> vector<4xindex> {
+  %1 = vector.insert %arg1, %arg0[2] : index into vector<4xindex>
+  return %1: vector<4xindex>
 }
 
 // -----
@@ -385,6 +411,18 @@ func.func @shuffle(%v0 : vector<1xf32>, %v1: vector<1xf32>) -> vector<4xf32> {
 
 // -----
 
+// CHECK-LABEL:  func @shuffle_index_vector
+//  CHECK-SAME:  %[[ARG0:.+]]: vector<1xindex>, %[[ARG1:.+]]: vector<1xindex>
+//       CHECK:    %[[V0:.+]] = builtin.unrealized_conversion_cast %[[ARG0]]
+//       CHECK:    %[[V1:.+]] = builtin.unrealized_conversion_cast %[[ARG1]]
+//       CHECK:    spirv.CompositeConstruct %[[V0]], %[[V1]], %[[V1]], %[[V0]] : (i32, i32, i32, i32) -> vector<4xi32>
+func.func @shuffle_index_vector(%v0 : vector<1xindex>, %v1: vector<1xindex>) -> vector<4xindex> {
+  %shuffle = vector.shuffle %v0, %v1 [0, 1, 1, 0] : vector<1xindex>, vector<1xindex>
+  return %shuffle : vector<4xindex>
+}
+
+// -----
+
 // CHECK-LABEL:  func @shuffle
 //  CHECK-SAME:  %[[V0:.+]]: vector<3xf32>, %[[V1:.+]]: vector<3xf32>
 //       CHECK:    spirv.VectorShuffle [3 : i32, 2 : i32, 5 : i32, 1 : i32] %[[V0]] : vector<3xf32>, %[[V1]] : vector<3xf32> -> vector<4xf32>
@@ -529,4 +567,26 @@ func.func @reduction_maxui(%v : vector<3xi32>, %s: i32) -> i32 {
 func.func @reduction_minui(%v : vector<3xi32>, %s: i32) -> i32 {
   %reduce = vector.reduction <minui>, %v, %s : vector<3xi32> into i32
   return %reduce : i32
+}
+
+// -----
+
+// CHECK-LABEL: @shape_cast_same_type
+//  CHECK-SAME: (%[[ARG0:.*]]: vector<2xf32>)
+//       CHECK:   return %[[ARG0]]
+func.func @shape_cast_same_type(%arg0 : vector<2xf32>) -> vector<2xf32> {
+  %1 = vector.shape_cast %arg0 : vector<2xf32> to vector<2xf32>
+  return %arg0 : vector<2xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @shape_cast_size1_vector
+//  CHECK-SAME: (%[[ARG0:.*]]: vector<f32>)
+//       CHECK:   %[[R0:.+]] = builtin.unrealized_conversion_cast %[[ARG0]] : vector<f32> to f32
+//       CHECK:   %[[R1:.+]] = builtin.unrealized_conversion_cast %[[R0]] : f32 to vector<1xf32>
+//       CHECK:   return %[[R1]]
+func.func @shape_cast_size1_vector(%arg0 : vector<f32>) -> vector<1xf32> {
+  %1 = vector.shape_cast %arg0 : vector<f32> to vector<1xf32>
+  return %1 : vector<1xf32>
 }

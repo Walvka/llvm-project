@@ -34,6 +34,21 @@ void nvgpu::NVGPUDialect::initialize() {
       >();
 }
 
+bool nvgpu::NVGPUDialect::isSharedMemoryAddressSpace(Attribute memorySpace) {
+  if (!memorySpace)
+    return false;
+  if (auto intAttr = llvm::dyn_cast<IntegerAttr>(memorySpace))
+    return intAttr.getInt() == NVGPUDialect::kSharedMemoryAddressSpace;
+  if (auto gpuAttr = llvm::dyn_cast<gpu::AddressSpaceAttr>(memorySpace))
+    return gpuAttr.getValue() == gpu::AddressSpace::Workgroup;
+  return false;
+}
+
+bool nvgpu::NVGPUDialect::hasSharedMemoryAddressSpace(MemRefType type) {
+  Attribute memorySpace = type.getMemorySpace();
+  return isSharedMemoryAddressSpace(memorySpace);
+}
+
 //===----------------------------------------------------------------------===//
 // NVGPU_DeviceAsyncCopyOp
 //===----------------------------------------------------------------------===//
@@ -50,16 +65,19 @@ static bool isLastMemrefDimUnitStride(MemRefType type) {
 }
 
 LogicalResult DeviceAsyncCopyOp::verify() {
-  auto srcMemref = getSrc().getType().cast<MemRefType>();
-  auto dstMemref = getDst().getType().cast<MemRefType>();
-  unsigned workgroupAddressSpace = gpu::GPUDialect::getWorkgroupAddressSpace();
+  auto srcMemref = llvm::cast<MemRefType>(getSrc().getType());
+  auto dstMemref = llvm::cast<MemRefType>(getDst().getType());
+
   if (!isLastMemrefDimUnitStride(srcMemref))
     return emitError("source memref most minor dim must have unit stride");
   if (!isLastMemrefDimUnitStride(dstMemref))
     return emitError("destination memref most minor dim must have unit stride");
-  if (dstMemref.getMemorySpaceAsInt() != workgroupAddressSpace)
-    return emitError("destination memref must have memory space ")
-           << workgroupAddressSpace;
+  if (!NVGPUDialect::hasSharedMemoryAddressSpace(dstMemref))
+    return emitError()
+           << "destination memref must have a memory space attribute of "
+              "IntegerAttr("
+           << NVGPUDialect::kSharedMemoryAddressSpace
+           << ") or gpu::AddressSpaceAttr(Workgroup)";
   if (dstMemref.getElementType() != srcMemref.getElementType())
     return emitError("source and destination must have the same element type");
   if (size_t(srcMemref.getRank()) != getSrcIndices().size())
@@ -69,6 +87,20 @@ LogicalResult DeviceAsyncCopyOp::verify() {
     return emitOpError() << "expected " << dstMemref.getRank()
                          << " destination indices, got "
                          << getDstIndices().size();
+  if (getBypassL1().has_value()) {
+    int64_t dstElements = getDstElements().getZExtValue();
+    int64_t sizeInBytes =
+        (dstMemref.getElementTypeBitWidth() * dstElements) / 8;
+    int64_t req = 16 * 8 / dstMemref.getElementTypeBitWidth();
+    if (getBypassL1().value() && sizeInBytes != 16) {
+      return emitOpError() << "bypassL1 does not satify alignment for "
+                           << dstMemref << " with destination element "
+                           << dstElements
+                           << ". Unset bypassL1, or set "
+                              "destination element to "
+                           << req;
+    }
+  }
   return success();
 }
 
@@ -80,6 +112,15 @@ void MmaSyncOp::build(::mlir::OpBuilder &odsBuilder,
                       Value matrixB, Value matrixC, ArrayAttr mmaShape) {
   build(odsBuilder, odsState, matrixC.getType(), matrixA, matrixB, matrixC,
         mmaShape, UnitAttr());
+}
+
+void MmaSyncOp::build(::mlir::OpBuilder &odsBuilder,
+                      ::mlir::OperationState &odsState, Value matrixA,
+                      Value matrixB, Value matrixC, ArrayRef<int64_t> mmaShape,
+                      bool tf32Enabled) {
+  build(odsBuilder, odsState, matrixC.getType(), matrixA, matrixB, matrixC,
+        odsBuilder.getI64ArrayAttr(mmaShape),
+        tf32Enabled ? odsBuilder.getUnitAttr() : UnitAttr());
 }
 
 /// Performs verification for MmaSyncOp and MmaSparseSyncOp.
@@ -217,6 +258,9 @@ void MmaSparseSyncOp::build(::mlir::OpBuilder &odsBuilder,
 }
 
 LogicalResult MmaSparseSyncOp::verify() {
+  unsigned sparsitySelector = getSparsitySelector();
+  if (sparsitySelector > 1)
+    return emitOpError() << "sparsity selector should be 0 or 1";
   return verifyMmaSyncOp(this->getOperation(), getMatrixA(), getMatrixB(),
                          getMatrixC(), getMmaShapeAsArray(),
                          getOperation()->hasAttr(getTf32EnabledAttrName()),
@@ -229,10 +273,10 @@ LogicalResult MmaSparseSyncOp::verify() {
 LogicalResult LdMatrixOp::verify() {
 
   // ldmatrix reads data from source in shared memory
-  auto srcMemref = getSrcMemref().getType().cast<MemRefType>();
+  auto srcMemref = llvm::cast<MemRefType>(getSrcMemref().getType());
 
   // ldmatrix writes data to result/destination in vector registers
-  auto resVector = getRes().getType().cast<VectorType>();
+  auto resVector = llvm::cast<VectorType>(getRes().getType());
 
   // vector register shape, element type, and bitwidth
   ArrayRef<int64_t> resShape = resVector.getShape();
@@ -248,17 +292,16 @@ LogicalResult LdMatrixOp::verify() {
   // transpose elements in vector registers at 16b granularity when true
   bool isTranspose = getTranspose();
 
-  // address space id for shared memory
-  unsigned smemAddressSpace = gpu::GPUDialect::getWorkgroupAddressSpace();
-
   //
   // verification
   //
 
-  if (!(srcMemref.getMemorySpaceAsInt() == smemAddressSpace))
+  if (!NVGPUDialect::hasSharedMemoryAddressSpace(srcMemref))
     return emitError()
-           << "expected nvgpu.ldmatrix srcMemref must have memory space "
-           << smemAddressSpace;
+           << "expected nvgpu.ldmatrix srcMemref must have a memory space "
+              "attribute of IntegerAttr("
+           << NVGPUDialect::kSharedMemoryAddressSpace
+           << ") or gpu::AddressSpaceAttr(Workgroup)";
   if (elementBitWidth > 32)
     return emitError() << "nvgpu.ldmatrix works for 32b or lower";
   if (isTranspose && !(elementBitWidth == 16))

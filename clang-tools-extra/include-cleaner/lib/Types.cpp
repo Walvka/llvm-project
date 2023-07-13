@@ -7,12 +7,24 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang-include-cleaner/Types.h"
+#include "TypesInternal.h"
 #include "clang/AST/Decl.h"
 #include "clang/Basic/FileEntry.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace clang::include_cleaner {
+
+std::string Symbol::name() const {
+  switch (kind()) {
+  case include_cleaner::Symbol::Macro:
+    return macro().Name->getName().str();
+  case include_cleaner::Symbol::Declaration:
+    return llvm::dyn_cast<NamedDecl>(&declaration())
+        ->getQualifiedNameAsString();
+  }
+  llvm_unreachable("Unknown symbol kind");
+}
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const Symbol &S) {
   switch (S.kind()) {
@@ -24,6 +36,18 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const Symbol &S) {
     return OS << S.macro().Name->getName();
   }
   llvm_unreachable("Unhandled Symbol kind");
+}
+
+llvm::StringRef Header::resolvedPath() const {
+  switch (kind()) {
+  case include_cleaner::Header::Physical:
+    return physical()->tryGetRealPathName();
+  case include_cleaner::Header::Standard:
+    return standard().name().trim("<>\"");
+  case include_cleaner::Header::Verbatim:
+    return verbatim().trim("<>\"");
+  }
+  llvm_unreachable("Unknown header kind");
 }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const Header &H) {
@@ -46,7 +70,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const Include &I) {
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const SymbolReference &R) {
   // We can't decode the Location without SourceManager. Its raw representation
   // isn't completely useless (and distinguishes SymbolReference from Symbol).
-  return OS << R.Target << "@0x"
+  return OS << R.RT << " reference to " << R.Target << "@0x"
             << llvm::utohexstr(
                    R.RefLocation.getRawEncoding(), /*LowerCase=*/false,
                    /*Width=*/CHAR_BIT * sizeof(SourceLocation::UIntTy));
@@ -106,4 +130,33 @@ llvm::SmallVector<const Include *> Includes::match(Header H) const {
   return Result;
 }
 
+llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const SymbolLocation &S) {
+  switch (S.kind()) {
+  case SymbolLocation::Physical:
+    // We can't decode the Location without SourceManager. Its raw
+    // representation isn't completely useless (and distinguishes
+    // SymbolReference from Symbol).
+    return OS << "@0x"
+              << llvm::utohexstr(
+                     S.physical().getRawEncoding(), /*LowerCase=*/false,
+                     /*Width=*/CHAR_BIT * sizeof(SourceLocation::UIntTy));
+  case SymbolLocation::Standard:
+    return OS << S.standard().scope() << S.standard().name();
+  }
+  llvm_unreachable("Unhandled Symbol kind");
+}
+
+bool Header::operator<(const Header &RHS) const {
+  if (kind() != RHS.kind())
+    return kind() < RHS.kind();
+  switch (kind()) {
+  case Header::Physical:
+    return physical()->getName() < RHS.physical()->getName();
+  case Header::Standard:
+    return standard().name() < RHS.standard().name();
+  case Header::Verbatim:
+    return verbatim() < RHS.verbatim();
+  }
+  llvm_unreachable("unhandled Header kind");
+}
 } // namespace clang::include_cleaner

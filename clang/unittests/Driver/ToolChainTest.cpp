@@ -243,7 +243,7 @@ TEST(ToolChainTest, GetTargetAndMode) {
   llvm::InitializeAllTargets();
   std::string IgnoredError;
   if (!llvm::TargetRegistry::lookupTarget("x86_64", IgnoredError))
-    return;
+    GTEST_SKIP();
 
   ParsedClangName Res = ToolChain::getTargetAndModeFromProgramName("clang");
   EXPECT_TRUE(Res.TargetPrefix.empty());
@@ -367,10 +367,20 @@ TEST(ToolChainTest, PostCallback) {
   EXPECT_TRUE(CallbackHasCalled);
 }
 
+TEST(CompilerInvocation, SplitSwarfSingleCrash) {
+  static constexpr const char *Args[] = {
+      "clang",     "--target=arm-linux-gnueabi",
+      "-gdwarf-4", "-gsplit-dwarf=single",
+      "-c",        "foo.cpp"};
+  CreateInvocationOptions CIOpts;
+  std::unique_ptr<CompilerInvocation> CI = createInvocation(Args, CIOpts);
+  EXPECT_TRUE(CI); // no-crash
+}
+
 TEST(GetDriverMode, PrefersLastDriverMode) {
   static constexpr const char *Args[] = {"clang-cl", "--driver-mode=foo",
                                          "--driver-mode=bar", "foo.cpp"};
-  EXPECT_EQ(getDriverMode(Args[0], llvm::makeArrayRef(Args).slice(1)), "bar");
+  EXPECT_EQ(getDriverMode(Args[0], llvm::ArrayRef(Args).slice(1)), "bar");
 }
 
 struct SimpleDiagnosticConsumer : public DiagnosticConsumer {

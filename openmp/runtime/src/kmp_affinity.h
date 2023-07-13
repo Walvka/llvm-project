@@ -62,7 +62,8 @@ public:
       }
       int error = errno;
       if (abort_on_error) {
-        __kmp_fatal(KMP_MSG(FatalSysError), KMP_ERR(error), __kmp_msg_null);
+        __kmp_fatal(KMP_MSG(FunctionError, "hwloc_get_cpubind()"),
+                    KMP_ERR(error), __kmp_msg_null);
       }
       return error;
     }
@@ -76,7 +77,8 @@ public:
       }
       int error = errno;
       if (abort_on_error) {
-        __kmp_fatal(KMP_MSG(FatalSysError), KMP_ERR(error), __kmp_msg_null);
+        __kmp_fatal(KMP_MSG(FunctionError, "hwloc_set_cpubind()"),
+                    KMP_ERR(error), __kmp_msg_null);
       }
       return error;
     }
@@ -95,7 +97,8 @@ public:
           return 0;
         error = errno;
         if (abort_on_error)
-          __kmp_fatal(KMP_MSG(FatalSysError), KMP_ERR(error), __kmp_msg_null);
+          __kmp_fatal(KMP_MSG(FunctionError, "hwloc_set_cpubind()"),
+                      KMP_ERR(error), __kmp_msg_null);
       }
       return error;
     }
@@ -372,7 +375,8 @@ class KMPNativeAffinity : public KMPAffinity {
       }
       int error = errno;
       if (abort_on_error) {
-        __kmp_fatal(KMP_MSG(FatalSysError), KMP_ERR(error), __kmp_msg_null);
+        __kmp_fatal(KMP_MSG(FunctionError, "pthread_getaffinity_np()"),
+                    KMP_ERR(error), __kmp_msg_null);
       }
       return error;
     }
@@ -392,7 +396,8 @@ class KMPNativeAffinity : public KMPAffinity {
       }
       int error = errno;
       if (abort_on_error) {
-        __kmp_fatal(KMP_MSG(FatalSysError), KMP_ERR(error), __kmp_msg_null);
+        __kmp_fatal(KMP_MSG(FunctionError, "pthread_setaffinity_np()"),
+                    KMP_ERR(error), __kmp_msg_null);
       }
       return error;
     }
@@ -681,9 +686,14 @@ struct kmp_hw_attr_t {
   bool operator!=(const kmp_hw_attr_t &rhs) const { return !operator==(rhs); }
 };
 
+#if KMP_AFFINITY_SUPPORTED
+KMP_BUILD_ASSERT(sizeof(kmp_hw_attr_t) == sizeof(kmp_affinity_attrs_t));
+#endif
+
 class kmp_hw_thread_t {
 public:
   static const int UNKNOWN_ID = -1;
+  static const int MULTIPLE_ID = -2;
   static int compare_ids(const void *a, const void *b);
   static int compare_compact(const void *a, const void *b);
   int ids[KMP_HW_LAST];

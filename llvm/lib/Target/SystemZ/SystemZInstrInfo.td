@@ -281,6 +281,9 @@ let isCall = 1, Defs = [CC] in {
   def BASR  : CallRR <"basr", 0x0D>;
 }
 
+// A symbol in the ADA (z/OS only).
+def adasym : Operand<i64>;
+
 // z/OS XPLINK
 let Predicates = [IsTargetXPLINK64] in {
   let isCall = 1, Defs = [R7D, CC], Uses = [FPC] in {
@@ -293,6 +296,19 @@ let Predicates = [IsTargetXPLINK64] in {
   let isCall = 1, Defs = [R3D, CC], Uses = [FPC] in {
     def CallBASR_STACKEXT  : Alias<4, (outs), (ins ADDR64:$R2), []>;
   }
+
+  let hasNoSchedulingInfo = 1, Defs = [CC] in {
+    def ADA_ENTRY : Alias<12, (outs GR64:$Reg), (ins adasym:$addr,
+                              ADDR64:$ADA, imm64:$Offset),
+                            [(set i64:$Reg, (z_ada_entry i64:$addr,
+                              i64:$ADA, i64:$Offset))]>;
+  }
+  let mayLoad = 1, AddedComplexity = 20, hasNoSchedulingInfo = 1, Defs = [CC] in {
+    def ADA_ENTRY_VALUE : Alias<12, (outs GR64:$Reg), (ins adasym:$addr,
+                              ADDR64:$ADA, imm64:$Offset),
+                            [(set i64:$Reg, (load (z_ada_entry
+                              iPTR:$addr, iPTR:$ADA, i64:$Offset)))]>;
+ }
 }
 
 // Regular calls.
@@ -347,7 +363,7 @@ let isCall = 1, isTerminator = 1, isReturn = 1 in {
 let Predicates = [IsTargetXPLINK64] in {
   // A return instruction (b 2(%r7)).
   let isReturn = 1, isTerminator = 1, isBarrier = 1, hasCtrlDep = 1 in
-    def Return_XPLINK : Alias<4, (outs), (ins), [(z_retflag)]>;
+    def Return_XPLINK : Alias<4, (outs), (ins), [(z_retglue)]>;
 
   // A conditional return instruction (bc <cond>, 2(%r7)).
   let isReturn = 1, isTerminator = 1, hasCtrlDep = 1, CCMaskFirst = 1, Uses = [CC] in
@@ -357,7 +373,7 @@ let Predicates = [IsTargetXPLINK64] in {
 let Predicates = [IsTargetELF] in {
   // A return instruction (br %r14).
   let isReturn = 1, isTerminator = 1, isBarrier = 1, hasCtrlDep = 1 in
-    def Return : Alias<2, (outs), (ins), [(z_retflag)]>;
+    def Return : Alias<2, (outs), (ins), [(z_retglue)]>;
 
   // A conditional return instruction (bcr <cond>, %r14).
   let isReturn = 1, isTerminator = 1, hasCtrlDep = 1, CCMaskFirst = 1, Uses = [CC] in
@@ -1715,10 +1731,6 @@ let Predicates = [FeatureExecutionHint], hasSideEffects = 1 in {
 // accesses, which expands to "bcr 14, 0".
 let hasSideEffects = 1 in
 def Serialize : Alias<2, (outs), (ins), []>;
-
-// A pseudo instruction that serves as a compiler barrier.
-let hasSideEffects = 1, hasNoSchedulingInfo = 1 in
-def MemBarrier : Pseudo<(outs), (ins), [(z_membarrier)]>;
 
 let Predicates = [FeatureInterlockedAccess1], Defs = [CC] in {
   def LAA   : LoadAndOpRSY<"laa",   0xEBF8, atomic_load_add_32, GR32>;

@@ -148,8 +148,8 @@ void ExprEngine::VisitObjCMessage(const ObjCMessageExpr *ME,
                                   ExplodedNode *Pred,
                                   ExplodedNodeSet &Dst) {
   CallEventManager &CEMgr = getStateManager().getCallEventManager();
-  CallEventRef<ObjCMethodCall> Msg =
-    CEMgr.getObjCMethodCall(ME, Pred->getState(), Pred->getLocationContext());
+  CallEventRef<ObjCMethodCall> Msg = CEMgr.getObjCMethodCall(
+      ME, Pred->getState(), Pred->getLocationContext(), getCFGElementRef());
 
   // There are three cases for the receiver:
   //   (1) it is definitely nil,
@@ -178,7 +178,7 @@ void ExprEngine::VisitObjCMessage(const ObjCMessageExpr *ME,
   // We could avoid dropping coverage by performing an explicit case split
   // on each method call -- but this would get very expensive. An alternative
   // would be to introduce lazy constraints.
-  // FIXME: This ignores many potential bugs (<rdar://problem/11733396>).
+  // FIXME: This ignores many potential bugs.
   // Revisit once we have lazier constraints.
   if (Msg->isInstanceMessage()) {
     SVal recVal = Msg->getReceiverSVal();

@@ -267,7 +267,7 @@
 ///
 ///===----------------------------------------------------------------------===//
 
-#include "Utils/WebAssemblyUtilities.h"
+#include "MCTargetDesc/WebAssemblyMCTargetDesc.h"
 #include "WebAssembly.h"
 #include "WebAssemblyTargetMachine.h"
 #include "llvm/ADT/StringExtras.h"
@@ -551,7 +551,7 @@ Value *WebAssemblyLowerEmscriptenEHSjLj::wrapInvoke(CallBase *CI) {
     auto [SizeArg, NEltArg] = *Args;
     SizeArg += 1;
     if (NEltArg)
-      NEltArg = NEltArg.value() + 1;
+      NEltArg = *NEltArg + 1;
     FnAttrs.addAllocSizeAttr(SizeArg, NEltArg);
   }
   // In case the callee has 'noreturn' attribute, We need to remove it, because
@@ -580,7 +580,7 @@ Function *WebAssemblyLowerEmscriptenEHSjLj::getInvokeWrapper(CallBase *CI) {
   FunctionType *CalleeFTy = CI->getFunctionType();
 
   std::string Sig = getSignature(CalleeFTy);
-  if (InvokeWrappers.find(Sig) != InvokeWrappers.end())
+  if (InvokeWrappers.contains(Sig))
     return InvokeWrappers[Sig];
 
   // Put the pointer to the callee as first argument
@@ -1217,7 +1217,7 @@ bool WebAssemblyLowerEmscriptenEHSjLj::runEHOnFunction(Function &F) {
     for (unsigned I = 0, E = LPI->getNumClauses(); I < E; ++I) {
       Constant *Clause = LPI->getClause(I);
       // TODO Handle filters (= exception specifications).
-      // https://bugs.llvm.org/show_bug.cgi?id=50396
+      // https://github.com/llvm/llvm-project/issues/49740
       if (LPI->isCatch(I))
         FMCArgs.push_back(Clause);
     }
@@ -1630,7 +1630,7 @@ void WebAssemblyLowerEmscriptenEHSjLj::handleLongjmpableCallsForEmscriptenSjLj(
 
       // Create switch instruction
       IRB.SetInsertPoint(EndBB);
-      IRB.SetCurrentDebugLocation(EndBB->getInstList().back().getDebugLoc());
+      IRB.SetCurrentDebugLocation(EndBB->back().getDebugLoc());
       SwitchInst *SI = IRB.CreateSwitch(Label, Tail, SetjmpRetPHIs.size());
       // -1 means no longjmp happened, continue normally (will hit the default
       // switch case). 0 means a longjmp that is not ours to handle, needs a
@@ -1726,10 +1726,8 @@ void WebAssemblyLowerEmscriptenEHSjLj::handleLongjmpableCallsForWasmSjLj(
   // that requires multivalue support in the toolchain, which is currently not
   // very reliable. We instead throw and catch a pointer to a struct value of
   // type 'struct __WasmLongjmpArgs', which is defined in Emscripten.
-  Instruction *CatchCI =
+  Instruction *LongjmpArgs =
       IRB.CreateCall(CatchF, {IRB.getInt32(WebAssembly::C_LONGJMP)}, "thrown");
-  Value *LongjmpArgs =
-      IRB.CreateBitCast(CatchCI, LongjmpArgsTy->getPointerTo(), "longjmp.args");
   Value *EnvField =
       IRB.CreateConstGEP2_32(LongjmpArgsTy, LongjmpArgs, 0, 0, "env_gep");
   Value *ValField =
